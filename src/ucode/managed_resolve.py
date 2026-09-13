@@ -61,6 +61,16 @@ def _agent_model_config(managed: dict, tool: str) -> dict[str, object]:
     return _as_dict(_agent_entry(managed, tool).get("model_config"))
 
 
+def managed_custom_headers(managed: dict, tool: str) -> dict[str, str]:
+    """The custom headers the managed config specifies for ``tool``, or an empty dict.
+
+    Headers the admin configured are sent with each outbound request to the AI Gateway,
+    allowing org policy to be enforced without modifying the local agent config.
+    Returns a cleaned {header_name: value} dict; empty when none are set."""
+    headers = _as_dict(_agent_entry(managed, tool).get("http_headers"))
+    return {k: v for k, v in headers.items() if isinstance(k, str) and isinstance(v, str)}
+
+
 def managed_state_overrides(managed: dict, tool: str) -> dict[str, object]:
     """The state keys to layer over local state so ``tool``'s writer sees the admin's models.
 
@@ -86,6 +96,16 @@ def managed_state_overrides(managed: dict, tool: str) -> dict[str, object]:
     default_model = _str(_agent_model_config(managed, tool).get("default_model"))
     if default_model:
         overrides[f"{tool}_default_model"] = default_model
+    if tool == "claude":
+        static_models = managed_static_models(managed, tool)
+        if static_models:
+            overrides["claude_static_models"] = static_models
+        location = managed_model_service_location(managed, tool)
+        if location:
+            overrides["claude_model_service_location"] = location
+        custom_hdrs = managed_custom_headers(managed, tool)
+        if custom_hdrs:
+            overrides["claude_custom_headers"] = custom_hdrs
     return overrides
 
 
@@ -165,11 +185,17 @@ def managed_supplies_models(managed: dict | None, tool: str) -> bool:
 
     Lets the launch path skip Databricks model discovery, whose whole purpose is to find the models
     the config has now specified. Any of these counts: a provider (the agent routes by header and
-    pins no Databricks model), a ``default_model``, or at least one model the agent's own
-    ``_manifest_models`` view resolves (Claude's family slots or a flat agent's ``model_services``).
+    pins no Databricks model), a ``default_model``, Claude's static ``model_services`` picker list or
+    ``unity_catalog_location``, or a model the agent's own ``_manifest_models`` view resolves
+    (Claude's family slots or a flat agent's ``model_services``).
     """
     model_config = _agent_model_config(managed or {}, tool)
     if _str(model_config.get("model_provider_service")) or _str(model_config.get("default_model")):
+        return True
+    if tool == "claude" and (
+        managed_static_models(managed or {}, tool)
+        or _str(model_config.get("unity_catalog_location"))
+    ):
         return True
     return _manifest_models(managed or {}, tool) is not None
 
@@ -177,6 +203,26 @@ def managed_supplies_models(managed: dict | None, tool: str) -> bool:
 def managed_provider_service(managed: dict, tool: str) -> str | None:
     """Return only the provider the managed config specifies for ``tool``, ignoring local state."""
     return _str(_agent_model_config(managed, tool).get("model_provider_service"))
+
+
+def managed_static_models(managed: dict, tool: str) -> list[str] | None:
+    """The explicit model allow-list (``model_config.model_services``) the config sets for ``tool``.
+
+    Static curation: the launch path writes exactly these into Claude's picker allow-list
+    (``availableModels``/``modelPicker``) instead of discovering the workspace's models. The order is
+    the admin's; empty and non-string entries are dropped. None when unset."""
+    model_services = _agent_model_config(managed, tool).get("model_services")
+    if isinstance(model_services, list):
+        listed = [model for model in (_str(item) for item in model_services) if model]
+        return listed or None
+    return None
+
+
+def managed_model_service_location(managed: dict, tool: str) -> str | None:
+    """The UC catalog/schema (``model_config.unity_catalog_location``) the config points ``tool`` at for
+    auto model discovery, or None. The agent discovers from the gateway rather than ucode pinning a
+    list, so the launch path only turns discovery on for this source."""
+    return _str(_agent_model_config(managed, tool).get("unity_catalog_location"))
 
 
 def managed_default_model(managed: dict, tool: str) -> str | None:
