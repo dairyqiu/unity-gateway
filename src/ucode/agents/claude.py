@@ -1367,8 +1367,8 @@ def launch(
 
 
 def validate_cmd(binary: str) -> list[str]:
-    # An extremely liteweight launch for testing, optimized to run using minimal
-    # tokens, to save cost on testing token usage.
+    # An extremely lightweight launch optimized to spend minimal tokens, cutting cost for both
+    # production (`ucode configure`) and testing.
     return [
         binary,
         "--settings",
