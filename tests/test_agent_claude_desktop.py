@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import subprocess
 
 import pytest
@@ -15,10 +16,24 @@ class TestRenderConfig:
         config = claude_desktop.render_config("http://127.0.0.1:51234", [])
         assert config["inferenceProvider"] == "gateway"
         assert config["inferenceGatewayBaseUrl"] == "http://127.0.0.1:51234"
-        assert config["coworkTabEnabled"] is True
+        # Discovery off (relayed /v1/models isn't served); models listed explicitly.
+        assert config["modelDiscoveryEnabled"] is False
         # The proxy injects credentials per request; the file must not carry a real one.
         assert config["inferenceGatewayApiKey"] == claude_desktop._CONFIG_KEY_PLACEHOLDER
         assert "sk-ant" not in config["inferenceGatewayApiKey"]
+        # The proxy injects headers; the config must not carry its own.
+        assert "inferenceCustomHeaders" not in config
+
+    def test_uses_only_schema_keys_desktop_authors(self):
+        # Guard against re-introducing invented keys Desktop ignores.
+        config = claude_desktop.render_config("http://127.0.0.1:1", [])
+        for invented in (
+            "chatTabEnabled",
+            "coworkTabEnabled",
+            "modelPrefer1mContext",
+            "disableDeploymentModeChooser",
+        ):
+            assert invented not in config
 
     def test_models_populate_inference_models_to_skip_discovery(self):
         config = claude_desktop.render_config(
@@ -31,6 +46,60 @@ class TestRenderConfig:
 
     def test_no_models_omits_inference_models(self):
         assert "inferenceModels" not in claude_desktop.render_config("http://127.0.0.1:1", [])
+
+
+class TestMetaRegistration:
+    """`_meta.json` is what makes an entry visible (`entries`) and active (`appliedId`)."""
+
+    def _library(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(claude_desktop, "current_os", lambda: OS.MACOS)
+        monkeypatch.setenv("HOME", str(tmp_path))
+        lib = claude_desktop._config_library_dir()
+        lib.mkdir(parents=True, exist_ok=True)
+        return lib
+
+    def test_creates_meta_and_applies_when_absent(self, monkeypatch, tmp_path):
+        lib = self._library(monkeypatch, tmp_path)
+        prior = claude_desktop.register_active_config("ug-id", name="Unity Gateway")
+        assert prior is None
+        meta = json.loads((lib / "_meta.json").read_text())
+        assert meta["appliedId"] == "ug-id"
+        assert {"id": "ug-id", "name": "Unity Gateway"} in meta["entries"]
+
+    def test_preserves_existing_entries_and_returns_prior_applied(self, monkeypatch, tmp_path):
+        lib = self._library(monkeypatch, tmp_path)
+        (lib / "_meta.json").write_text(
+            json.dumps(
+                {"appliedId": "default-id", "entries": [{"id": "default-id", "name": "Default"}]}
+            )
+        )
+        prior = claude_desktop.register_active_config("ug-id")
+        assert prior == "default-id"
+        meta = json.loads((lib / "_meta.json").read_text())
+        assert meta["appliedId"] == "ug-id"
+        ids = {e["id"] for e in meta["entries"]}
+        assert ids == {"default-id", "ug-id"}  # Default preserved
+
+    def test_reregistering_does_not_duplicate(self, monkeypatch, tmp_path):
+        lib = self._library(monkeypatch, tmp_path)
+        claude_desktop.register_active_config("ug-id")
+        claude_desktop.register_active_config("ug-id")
+        meta = json.loads((lib / "_meta.json").read_text())
+        assert [e for e in meta["entries"] if e["id"] == "ug-id"] == [
+            {"id": "ug-id", "name": claude_desktop._ENTRY_NAME}
+        ]
+
+    def test_restore_hands_applied_id_back(self, monkeypatch, tmp_path):
+        lib = self._library(monkeypatch, tmp_path)
+        (lib / "_meta.json").write_text(
+            json.dumps(
+                {"appliedId": "default-id", "entries": [{"id": "default-id", "name": "Default"}]}
+            )
+        )
+        prior = claude_desktop.register_active_config("ug-id")
+        claude_desktop.restore_active_config(prior)
+        meta = json.loads((lib / "_meta.json").read_text())
+        assert meta["appliedId"] == "default-id"
 
 
 class TestConfigPath:

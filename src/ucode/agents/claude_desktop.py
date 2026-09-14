@@ -14,15 +14,17 @@ file would leave them to go stale — the Databricks OAuth token expires in ~1h.
      Anthropic `Authorization` + the `Databricks-Model-Provider-Service` routing
      header on every request. The Desktop client's own credential/auth-scheme is
      irrelevant: the proxy drops it and owns the upstream auth.
-  3. Write a Claude Desktop gateway config pointing at that proxy, holding NO real
-     tokens (only a loopback URL), so nothing in the file can go stale.
+  3. Write a Claude Desktop gateway config pointing at that proxy (holding NO real
+     tokens, only a loopback URL) and register it in ``configLibrary/_meta.json`` as
+     an entry and the applied config — a file alone is invisible to Desktop. The
+     prior applied config is restored on exit.
   4. Stay in the foreground to keep the proxy alive while Desktop is used.
 
 EXPERIMENTAL. The Desktop gateway-config schema (the Claude-3p ``configLibrary``
-entry) is not a public contract; the keys written here are the ones observed to
-work and may drift across Desktop releases. Discovery relies on ``inferenceModels``
-being populated so Desktop skips its ``GET /v1/models`` probe (which the relayed
-path does not serve until the corresponding gateway route change ships).
+entry + ``_meta.json`` registry) is not a public contract; the keys written here
+mirror what Desktop authors and may drift across releases. ``modelDiscoveryEnabled``
+is false and models are listed explicitly, because the relayed ``GET /v1/models``
+probe is not served until the companion gateway route change ships.
 """
 
 from __future__ import annotations
@@ -37,7 +39,7 @@ import uuid
 from pathlib import Path
 
 from ucode import gateway_proxy
-from ucode.config_io import backup_existing_file, write_json_file
+from ucode.config_io import backup_existing_file, read_json_safe, write_json_file
 from ucode.constants import LOOPBACK_HOST, MODEL_PROVIDER_SERVICE_HEADER
 from ucode.databricks import get_databricks_token
 from ucode.managed_files import OS, current_os
@@ -58,6 +60,14 @@ _STRIP_CLIENT_AUTH_HEADERS = frozenset({"x-api-key", "authorization"})
 # Placeholder written as the Desktop config's key. The proxy overwrites
 # `Authorization` and drops `x-api-key`, so no real credential lives on disk.
 _CONFIG_KEY_PLACEHOLDER = "ug-refresh-proxy-injects-credentials"
+# Desktop's registry file inside configLibrary/: `{appliedId, entries: [{id, name}]}`.
+# A config file is invisible to Desktop until it is listed in `entries`, and inactive
+# until it is the `appliedId`. ug registers its entry and applies it, then restores the
+# prior appliedId on exit so Desktop doesn't stay pinned to a dead-proxy config.
+_META_FILENAME = "_meta.json"
+_ENTRY_NAME = "Unity Gateway"
+# Desktop writes its own configLibrary files mode 0600; match that.
+_CONFIG_FILE_MODE = 0o600
 
 
 def _app_support_dir() -> Path:
@@ -76,35 +86,74 @@ def _app_support_dir() -> Path:
     )
 
 
-def config_path(workspace: str) -> Path:
-    """Path to the ug-owned Desktop gateway-config entry for ``workspace``.
+def _config_library_dir() -> Path:
+    return _app_support_dir() / "configLibrary"
 
-    Desktop scans ``configLibrary/`` for entries; we key ours by a deterministic
-    UUID of the workspace so re-runs update one stable file per workspace rather
-    than accumulating duplicates.
+
+def config_entry_id(workspace: str) -> str:
+    """Deterministic entry id for ``workspace`` so re-runs reuse one stable entry
+    rather than accumulating duplicates."""
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"ug-claude-cowork::{workspace}"))
+
+
+def config_path(workspace: str) -> Path:
+    """Path to the ug-owned Desktop gateway-config entry for ``workspace``."""
+    return _config_library_dir() / f"{config_entry_id(workspace)}.json"
+
+
+def register_active_config(entry_id: str, name: str = _ENTRY_NAME) -> str | None:
+    """Register ``entry_id`` in Desktop's ``_meta.json`` and mark it applied.
+
+    Preserves existing entries (e.g. the user's ``Default``) and returns the prior
+    ``appliedId`` so the caller can restore it on exit.
     """
-    entry = uuid.uuid5(uuid.NAMESPACE_URL, f"ug-claude-cowork::{workspace}")
-    return _app_support_dir() / "configLibrary" / f"{entry}.json"
+    meta_path = _config_library_dir() / _META_FILENAME
+    meta = read_json_safe(meta_path) if meta_path.exists() else {}
+    prior_applied = meta.get("appliedId")
+    entries = meta.get("entries")
+    entries = (
+        [e for e in entries if isinstance(e, dict) and e.get("id") != entry_id]
+        if (isinstance(entries, list))
+        else []
+    )
+    entries.append({"id": entry_id, "name": name})
+    meta["entries"] = entries
+    meta["appliedId"] = entry_id
+    write_json_file(meta_path, meta)
+    os.chmod(meta_path, _CONFIG_FILE_MODE)
+    return prior_applied if isinstance(prior_applied, str) else None
+
+
+def restore_active_config(prior_applied: str | None) -> None:
+    """Point ``appliedId`` back to ``prior_applied`` (or clear it), so Desktop's
+    next restart doesn't boot into the now-dead loopback-proxy config."""
+    meta_path = _config_library_dir() / _META_FILENAME
+    if not meta_path.exists():
+        return
+    meta = read_json_safe(meta_path)
+    if prior_applied is not None:
+        meta["appliedId"] = prior_applied
+    else:
+        meta.pop("appliedId", None)
+    write_json_file(meta_path, meta)
+    os.chmod(meta_path, _CONFIG_FILE_MODE)
 
 
 def render_config(base_url: str, models: list[str]) -> dict:
     """The Desktop gateway config pointing at the loopback proxy.
 
-    Holds no real credentials — the proxy injects them per request. ``models``
-    populates ``inferenceModels`` so Desktop skips discovery (its ``/v1/models``
-    probe is not served on the relayed path).
+    Mirrors the schema Desktop authors for a gateway config. Holds no real
+    credentials and no ``inferenceCustomHeaders`` — the proxy injects the
+    Authorization, swap, and Model-Provider-Service headers per request.
+    ``modelDiscoveryEnabled`` is false and ``models`` are listed explicitly,
+    because the relayed ``/v1/models`` probe isn't served.
     """
     config: dict = {
         "inferenceProvider": "gateway",
         "inferenceGatewayBaseUrl": base_url,
         "inferenceCredentialKind": "static",
         "inferenceGatewayApiKey": _CONFIG_KEY_PLACEHOLDER,
-        "chatTabEnabled": True,
-        "coworkTabEnabled": True,
-        "modelPrefer1mContext": True,
-        # Skip the deployment-mode picker so the app boots straight into the
-        # configured gateway.
-        "disableDeploymentModeChooser": True,
+        "modelDiscoveryEnabled": False,
     }
     if models:
         config["inferenceModels"] = [{"name": model} for model in models]
@@ -220,15 +269,19 @@ def launch(
     path.parent.mkdir(parents=True, exist_ok=True)
     backup_existing_file(path, path.with_suffix(".json.ug-backup"))
     write_json_file(path, render_config(base_url, models or []))
+    os.chmod(path, _CONFIG_FILE_MODE)
+    # Register + activate the entry (a file alone is invisible to Desktop); remember
+    # the prior applied config so we can hand it back when the proxy stops.
+    prior_applied = register_active_config(config_entry_id(workspace))
 
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
 
     print_success(f"Gateway refresh proxy running at {base_url}")
     print_note(
-        "Open Claude Desktop and select the ug gateway config, or restart it if already open. "
-        "Keep this command running while you use Desktop — closing it stops the proxy.\n"
-        f"Config: {path}"
+        f"Registered + applied the '{_ENTRY_NAME}' gateway config. Fully quit Claude Desktop "
+        "(Cmd-Q) and reopen it to pick it up — it reads the config only at startup. Keep this "
+        f"command running while you use Desktop; closing it stops the proxy.\nConfig: {path}"
     )
     try:
         # Park until Ctrl-C; the daemon thread serves requests in the meantime.
@@ -239,6 +292,10 @@ def launch(
         cache.stop()
         server.shutdown()
         client.close()
+        # Hand the applied config back so Desktop's next restart doesn't boot into
+        # this now-dead loopback proxy.
+        restore_active_config(prior_applied)
         print_warning(
-            "Gateway refresh proxy stopped; Claude Desktop can no longer reach the gateway."
+            "Gateway refresh proxy stopped; Claude Desktop can no longer reach the gateway. "
+            "Restored the previously-applied config."
         )
