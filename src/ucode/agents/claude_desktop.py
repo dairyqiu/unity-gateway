@@ -32,9 +32,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
-import signal
 import subprocess
-import threading
 import uuid
 from pathlib import Path
 
@@ -274,9 +272,6 @@ def launch(
     # the prior applied config so we can hand it back when the proxy stops.
     prior_applied = register_active_config(config_entry_id(workspace))
 
-    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
-    server_thread.start()
-
     print_success(f"Gateway refresh proxy running at {base_url}")
     print_note(
         f"Registered + applied the '{_ENTRY_NAME}' gateway config. Fully quit Claude Desktop "
@@ -284,8 +279,11 @@ def launch(
         f"command running while you use Desktop; closing it stops the proxy.\nConfig: {path}"
     )
     try:
-        # Park until Ctrl-C; the daemon thread serves requests in the meantime.
-        signal.pause() if hasattr(signal, "pause") else threading.Event().wait()
+        # Serve on the main thread until Ctrl-C. serve_forever() blocks in select()
+        # and unwinds only via shutdown() or the KeyboardInterrupt SIGINT raises — it
+        # does NOT wake on unrelated signals (SIGCHLD/SIGPIPE/SIGWINCH), unlike
+        # signal.pause(), which would otherwise drop the proxy on the first inference.
+        server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
