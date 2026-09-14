@@ -115,7 +115,9 @@ jobs:
     name: CUJs
     needs: workspace
     runs-on: ubuntu-22.04
-    timeout-minutes: 45
+    # The runner enforces its own 3600s pytest deadline; keep the job above it
+    # so a slow run fails through the runner's report instead of a job kill.
+    timeout-minutes: 70
     env:
       UCODE_TEST_WORKSPACE: ${{ secrets.UCODE_TEST_WORKSPACE }}
       DATABRICKS_BEARER: ${{ secrets.DATABRICKS_BEARER }}

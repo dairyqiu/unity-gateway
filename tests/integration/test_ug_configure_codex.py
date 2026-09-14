@@ -70,7 +70,7 @@ def test_ug_configure_codex_openai_mps(live_session, workspace, codex_provider):
     with AgentTerminal(session, "codex", [str(session.binary), "codex"], "provider-session") as tui:
         tui.boot()
         tui.submit(task.prompt)
-        tui.wait_for_task(task)
+        tui.wait_for_task(task, timeout=300)
         tui.exit_normally()
     task.assert_completed(session, "codex")
     session.assert_not_routed()

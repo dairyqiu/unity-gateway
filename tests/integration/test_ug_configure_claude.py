@@ -76,7 +76,7 @@ def test_ug_configure_claude_anthropic_mps(live_session, workspace, claude_provi
     ) as tui:
         tui.boot()
         tui.submit(task.prompt)
-        tui.wait_for_task(task)
+        tui.wait_for_task(task, timeout=300)
         tui.exit_normally()
     task.assert_completed(session, "claude")
     session.assert_not_routed()
