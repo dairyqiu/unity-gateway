@@ -8,7 +8,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from ucode import codex_config
+from ucode import codex_config, databricks
 from ucode.agents import LaunchOptions, codex
 from ucode.smart_routing import codex_interposer, codex_routing, v2
 
@@ -186,7 +186,7 @@ class TestLaunchCodex:
         def harness_models(app_server_url):
             assert len(processes) == 1
             harness_calls.append(app_server_url)
-            return ["gpt-5.5", "gpt-5.6-sol"], None
+            return ["system.ai.glm-5-3", "gpt-5.5", "gpt-5.6-sol"], None
 
         monkeypatch.setattr(codex, "list_harness_models", harness_models)
 
@@ -217,9 +217,9 @@ class TestLaunchCodex:
 
         monkeypatch.setattr(v2, "get_databricks_token", get_token)
         monkeypatch.setattr(
-            v2,
-            "list_codex_models",
-            lambda workspace, token: (["system.ai.glm-5-3", "system.ai.gpt-5-6-sol"], None),
+            databricks,
+            "_http_get_json",
+            lambda *_args, **_kwargs: pytest.fail("queried gateway"),
         )
         monkeypatch.setattr(v2, "_free_port", lambda: 41001)
         monkeypatch.setattr(v2, "_wait_for_app_server", lambda port, timeout: True)
@@ -288,8 +288,8 @@ class TestLaunchCodex:
         assert interposer_args["args"] == (v2.LOOPBACK_HOST, "ws://127.0.0.1:41001")
         assert interposer_args["kwargs"]["available_models"] == [
             "system.ai.glm-5-3",
-            "gpt-5.6-sol",
             "gpt-5.5",
+            "gpt-5.6-sol",
         ]
         assert harness_calls == ["ws://127.0.0.1:41001"]
         assert len(processes) == 2
@@ -353,18 +353,23 @@ class TestLaunchCodex:
         assert "--model old" not in routing_commands[0]
 
     @pytest.mark.parametrize(
-        ("gateway", "harness"),
+        ("catalog", "start_model"),
         [
-            ((["system.ai.gpt-5-6-sol"], None), ([], "harness unavailable")),
-            (([], "gateway unavailable"), (["gpt-5.6-sol"], None)),
+            ((["gpt-5.6-sol"], None), None),
+            (([], "model/list timed out"), "gpt-5.6-sol"),
+            (([], "model/list returned no models"), "gpt-5.6-sol"),
         ],
     )
-    def test_available_catalog_selects_starting_model(self, monkeypatch, gateway, harness):
+    def test_app_server_catalog_or_configured_start_model(self, monkeypatch, catalog, start_model):
         processes = []
         monkeypatch.setattr(v2, "custom_catalog_models", lambda: None)
         monkeypatch.setattr(v2, "get_databricks_token", lambda workspace, profile: "token")
-        monkeypatch.setattr(v2, "list_codex_models", lambda workspace, token: gateway)
-        monkeypatch.setattr(codex, "list_harness_models", lambda *_args: harness)
+        monkeypatch.setattr(codex, "list_harness_models", lambda *_args: catalog)
+        monkeypatch.setattr(
+            databricks,
+            "_http_get_json",
+            lambda *_args, **_kwargs: pytest.fail("queried gateway"),
+        )
         monkeypatch.setattr(codex, "agent_version", lambda binary: "unknown")
         monkeypatch.setattr(v2, "_free_port", lambda: 41001)
         monkeypatch.setattr(v2, "_wait_for_app_server", lambda port, timeout: True)
@@ -393,19 +398,25 @@ class TestLaunchCodex:
                 {"workspace": WS},
                 [],
                 binary="codex",
-                start_model=None,
+                start_model=start_model,
                 render_overlay=codex.render_overlay,
             )
 
         assert exc.value.code == 0
-        if gateway[0]:
+        if start_model:
             assert 'model="gpt-5.6-sol"' in processes[0]
+        else:
+            assert not any(arg.startswith("model=") for arg in processes[0])
         assert processes[1][-2:] == ["--model", "gpt-5.6-sol"]
 
-    def test_empty_catalogs_do_not_fall_back_to_cached_models(self, monkeypatch):
+    def test_empty_app_server_catalog_does_not_fall_back_to_cached_models(self, monkeypatch):
         monkeypatch.setattr(v2, "custom_catalog_models", lambda: None)
         monkeypatch.setattr(v2, "get_databricks_token", lambda *_args: "token")
-        monkeypatch.setattr(v2, "list_codex_models", lambda *_args: ([], "gateway unavailable"))
+        monkeypatch.setattr(
+            databricks,
+            "_http_get_json",
+            lambda *_args, **_kwargs: pytest.fail("queried gateway"),
+        )
         monkeypatch.setattr(
             codex, "list_harness_models", lambda *_args: ([], "harness unavailable")
         )
@@ -494,7 +505,11 @@ class TestCustomCatalogModels:
             default=self._catalog(tmp_path / "default.json", ["gpt-lower-precedence"]),
         )
         monkeypatch.setattr(v2, "get_databricks_token", lambda *_args: "token")
-        monkeypatch.setattr(v2, "list_codex_models", lambda *_args: pytest.fail("queried gateway"))
+        monkeypatch.setattr(
+            databricks,
+            "_http_get_json",
+            lambda *_args, **_kwargs: pytest.fail("queried gateway"),
+        )
         monkeypatch.setattr(
             codex, "list_harness_models", lambda *_args: pytest.fail("queried harness")
         )
@@ -521,7 +536,11 @@ class TestCustomCatalogModels:
         monkeypatch.setattr(
             codex, "list_harness_models", lambda *_args: pytest.fail("queried harness")
         )
-        monkeypatch.setattr(v2, "list_codex_models", lambda *_args: pytest.fail("queried gateway"))
+        monkeypatch.setattr(
+            databricks,
+            "_http_get_json",
+            lambda *_args, **_kwargs: pytest.fail("queried gateway"),
+        )
         monkeypatch.setattr(v2, "_free_port", lambda: 41001)
         monkeypatch.setattr(v2, "_wait_for_app_server", lambda port, timeout: True)
         monkeypatch.setattr(codex, "agent_version", lambda _binary: "0.145.0")

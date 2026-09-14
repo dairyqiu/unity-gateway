@@ -255,43 +255,6 @@ class TestDiscoverClaudeModels:
         assert models["fable"] == "databricks-claude-fable-5"
 
 
-class TestListCodexModels:
-    def test_lists_codex_model_ids(self, monkeypatch):
-        captured = {}
-        payload = {
-            "data": [
-                {"id": "system.ai.gpt-5-6-sol"},
-                {"id": "gpt-6-astra"},
-                {"id": "gpt-6-astra"},
-                {"id": ""},
-            ]
-        }
-
-        def fake_get(url, token, **kwargs):
-            captured["request"] = (url, token, kwargs)
-            return payload, None
-
-        monkeypatch.setattr(db_mod, "_http_get_json", fake_get)
-
-        models, reason = db_mod.list_codex_models(WS, "token")
-
-        assert reason is None
-        assert models == ["system.ai.gpt-5-6-sol", "gpt-6-astra"]
-        assert captured["request"] == (
-            f"{WS}/ai-gateway/codex/v1/models",
-            "token",
-            {"max_retries": 2},
-        )
-
-    def test_reports_empty_catalog(self, monkeypatch):
-        monkeypatch.setattr(db_mod, "_http_get_json", lambda *_args, **_kwargs: ({}, None))
-
-        assert db_mod.list_codex_models(WS, "token") == (
-            [],
-            "AI Gateway returned no Codex model ids",
-        )
-
-
 def _model_service(model_id: str) -> dict:
     """A model-services entry whose `name` strips to `model_id`."""
     return {"name": f"model-services/{model_id}"}

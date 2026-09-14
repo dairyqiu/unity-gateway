@@ -52,7 +52,6 @@ WINDOWS_DATABRICKS_INSTALL_URL = (
 )
 AI_GATEWAY_DOCS_URL = "https://docs.databricks.com/aws/en/ai-gateway/overview-beta"
 ANTHROPIC_MODELS_PATH = "/ai-gateway/anthropic/v1/models"
-CODEX_MODELS_PATH = "/ai-gateway/codex/v1/models"
 # v1.0.0 is the release that ships `databricks aitools`.
 MIN_DATABRICKS_CLI_VERSION = (1, 0, 0)
 TOKEN_REFRESH_INTERVAL_SECONDS = 1800
@@ -2680,32 +2679,6 @@ def list_anthropic_model_catalog(workspace: str, token: str) -> AnthropicModelCa
         model_id_to_display_name={},
         error_msg="AI Gateway returned no Anthropic model ids",
     )
-
-
-def list_codex_models(workspace: str, token: str) -> tuple[list[str], str | None]:
-    """List every model id advertised by AI Gateway's Codex endpoint."""
-    hostname = workspace_hostname(workspace)
-    payload, reason = _http_get_json(
-        f"https://{hostname}{CODEX_MODELS_PATH}",
-        token,
-        max_retries=_ANTHROPIC_MODEL_DISCOVERY_SETUP_MAX_RETRIES,
-    )
-    if payload is None:
-        return [], reason
-
-    data = cast(dict, payload) if isinstance(payload, dict) else {}
-    model_ids: list[str] = []
-    seen: set[str] = set()
-    for model in data.get("data", []):
-        if not isinstance(model, dict):
-            continue
-        model_id = model.get("id")
-        if isinstance(model_id, str) and model_id and model_id not in seen:
-            seen.add(model_id)
-            model_ids.append(model_id)
-    if model_ids:
-        return model_ids, None
-    return [], "AI Gateway returned no Codex model ids"
 
 
 def discover_claude_models(workspace: str, token: str) -> tuple[dict[str, str], str | None]:

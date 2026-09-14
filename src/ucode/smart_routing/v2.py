@@ -29,7 +29,6 @@ from ucode.databricks import (
     get_databricks_token,
     list_anthropic_model_catalog,
     list_anthropic_models,
-    list_codex_models,
 )
 from ucode.smart_routing import LEGACY_STATE_KEY as LEGACY_STATE_KEY
 from ucode.smart_routing import claude_routing, codex_interposer, routing
@@ -39,7 +38,7 @@ from ucode.smart_routing.claude_hooks import (
     sync_smart_routing_hooks,
 )
 from ucode.smart_routing.codex_hooks import merge_pre_tool_use_hooks
-from ucode.smart_routing.codex_routing import codex_model_id, routing_model_id
+from ucode.smart_routing.codex_routing import codex_model_id
 from ucode.ui import print_note, print_warning
 
 if os.name != "nt":
@@ -514,12 +513,7 @@ def launch_codex(
     token = get_databricks_token(workspace, profile)
     os.environ[OAUTH_TOKEN_ENV_VAR] = token
     catalog_models = custom_catalog_models()
-    if catalog_models:
-        available_models = catalog_models
-    else:
-        available_models, discovery_error = list_codex_models(workspace, token)
-        if discovery_error:
-            print_warning(f"Smart routing model discovery: {discovery_error}")
+    available_models = catalog_models or []
     if catalog_models:
         print_note(
             f"Smart routing: routing across {len(catalog_models)} models from the configured "
@@ -556,27 +550,21 @@ def launch_codex(
                     "Codex app-server did not become ready for smart routing; check workspace auth."
                 )
             if not catalog_models:
-                harness_models, harness_error = agents.codex.list_harness_models(app_server_url)
-                available_models = list(
-                    {
-                        routing_model_id(model): model
-                        for model in [*available_models, *harness_models]
-                    }.values()
-                )
-                if harness_error:
-                    print_warning(f"Smart routing model discovery: {harness_error}")
+                available_models, discovery_error = agents.codex.list_harness_models(app_server_url)
+                if discovery_error:
+                    print_warning(f"Smart routing model discovery: {discovery_error}")
                 write_json_file(models_file, {"models": available_models})
                 print_note(
                     f"Smart routing: routing across {len(available_models)} models from "
-                    "AI Gateway and the Codex harness."
+                    "the Codex app-server model/list catalog."
                 )
             start_model = start_model or (
                 codex_model_id(available_models[0]) if available_models else None
             )
             if not start_model:
                 raise RuntimeError(
-                    "Smart routing could not determine a starting Codex model from AI Gateway "
-                    "or the Codex harness. Check workspace authentication and `codex --version`, "
+                    "Smart routing could not determine a starting model from the Codex "
+                    "app-server. Check workspace authentication and `codex --version`, "
                     "then retry."
                 )
             if not available_models:

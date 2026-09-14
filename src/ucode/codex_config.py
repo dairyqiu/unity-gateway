@@ -62,7 +62,7 @@ def custom_catalog_models() -> list[str] | None:
         raise RuntimeError(
             f"Codex smart routing could not read models from the custom catalog {catalog_ref} "
             f"referenced by {path}. Fix the catalog or remove model_catalog_json "
-            "to use gateway and harness discovery."
+            "to use Codex app-server model discovery."
         )
     return None
 
