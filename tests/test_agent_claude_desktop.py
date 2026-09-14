@@ -96,3 +96,12 @@ class TestResolveAnthropicOauth:
         monkeypatch.setattr(subprocess, "run", _fake_run)
         with pytest.raises(RuntimeError, match="was not found on PATH"):
             claude_desktop._resolve_anthropic_oauth()
+
+
+class TestEnsureDatabricksSession:
+    def test_missing_databricks_cli_raises_actionable_error(self, monkeypatch):
+        # A missing `databricks` binary must surface a clear install hint, not a
+        # raw FileNotFoundError traceback out of get_databricks_token.
+        monkeypatch.setattr(claude_desktop.shutil, "which", lambda _name: None)
+        with pytest.raises(RuntimeError, match="`databricks` CLI was not found"):
+            claude_desktop._ensure_databricks_session("https://ws.example.com", None)

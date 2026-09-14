@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import signal
 import subprocess
 import threading
@@ -155,10 +156,17 @@ def _resolve_anthropic_oauth() -> str:
 def _ensure_databricks_session(workspace: str, profile: str | None) -> None:
     """Make sure a Databricks OAuth session exists so the proxy can mint swap
     credentials, launching `databricks auth login` if the token fetch fails."""
+    if shutil.which("databricks") is None:
+        raise RuntimeError(
+            "The `databricks` CLI was not found on PATH. Install it "
+            "(https://docs.databricks.com/dev-tools/cli/install.html), then re-run."
+        )
     try:
         get_databricks_token(workspace, profile)
         return
-    except RuntimeError:
+    except (RuntimeError, FileNotFoundError):
+        # RuntimeError: no/expired session. FileNotFoundError: the CLI vanished
+        # between the which() check and the call. Either way, try an explicit login.
         pass
     print_note(f"Launching Databricks sign-in for {workspace}...")
     cmd = ["databricks", "auth", "login", "--host", workspace]
