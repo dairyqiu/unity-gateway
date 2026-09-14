@@ -13,10 +13,12 @@ from __future__ import annotations
 import atexit
 import json
 import os
+import random
 import shutil
 import subprocess
 import tempfile
 import threading
+import time
 from pathlib import Path
 from urllib import error as urllib_error
 from urllib import request as urllib_request
@@ -85,6 +87,49 @@ def _run_agent(
         env=env,
         stdin=subprocess.DEVNULL,
     )
+
+
+# Every per-model launch test fires a real inference request at the shared test workspace's
+# ai-gateway, which enforces a per-workspace rate limit. When several CI jobs run their per-model
+# suites at once the combined load trips 429s. Codex's own retry budget expires in about three
+# seconds, too fast for the limit window to reset under that load, so retry here with a longer
+# backoff. If a launch is still throttled after the retries, the caller skips instead of failing
+# so a saturated shared workspace does not red the CI of unrelated PRs.
+_RATE_LIMIT_MARKERS = ("429", "too many requests", "exceeded retry limit")
+
+
+def _looks_rate_limited(text: str) -> bool:
+    lowered = text.lower()
+    return any(marker in lowered for marker in _RATE_LIMIT_MARKERS)
+
+
+def _run_agent_retrying_rate_limits(
+    cmd: list[str], env: dict | None = None, timeout: int = 60, attempts: int = 3
+) -> subprocess.CompletedProcess:
+    """Like ``_run_agent`` but retry with exponential backoff while the launch is rate-limited.
+
+    Only 429s are retried; a clean exit or any non-rate-limit result returns immediately, and
+    ``TimeoutExpired`` propagates so callers keep their existing timeout handling."""
+    delay = 5.0
+    result = _run_agent(cmd, env=env, timeout=timeout)
+    for _retry in range(attempts - 1):
+        if result.returncode == 0 or not _looks_rate_limited(result.stdout + result.stderr):
+            return result
+        time.sleep(delay + random.uniform(0, delay))
+        delay *= 2
+        result = _run_agent(cmd, env=env, timeout=timeout)
+    return result
+
+
+def _skip_if_all_rate_limited(failures: list[str], harness: str) -> None:
+    """Skip instead of failing when every remaining failure is a shared-workspace 429.
+
+    A genuine regression produces a non-rate-limit failure, which still trips the caller's assert."""
+    if failures and all(_looks_rate_limited(failure) for failure in failures):
+        pytest.skip(
+            f"{harness} ai-gateway still rate-limited (429) after retries; "
+            "shared test workspace is saturated:\n" + "\n".join(failures)
+        )
 
 
 def _codex_home_outside_tmp() -> Path:
@@ -491,7 +536,7 @@ class TestCodexLaunch:
 
             cmd = codex.validate_cmd("codex")
             try:
-                result = _run_agent(
+                result = _run_agent_retrying_rate_limits(
                     cmd,
                     env={**os.environ, "CODEX_HOME": str(config_dir)},
                     timeout=timeout_seconds,
@@ -509,6 +554,7 @@ class TestCodexLaunch:
                     f"stdout={result.stdout[-500:]!r} stderr={result.stderr[-1500:]!r}"
                 )
 
+        _skip_if_all_rate_limited(failures, "Codex")
         assert not failures, "Codex launch failures:\n" + "\n".join(failures)
 
 
@@ -553,7 +599,7 @@ class TestClaudeLaunch:
                 "ANTHROPIC_API_KEY": e2e_token,
             }
             cmd = claude.validate_cmd("claude")
-            result = _run_agent(cmd, env=env, timeout=90)
+            result = _run_agent_retrying_rate_limits(cmd, env=env, timeout=90)
             combined = (result.stdout + result.stderr).strip()
             if result.returncode != 0 or not combined:
                 failures.append(
@@ -561,6 +607,7 @@ class TestClaudeLaunch:
                     f"stdout={result.stdout[:300]!r} stderr={result.stderr[:300]!r}"
                 )
 
+        _skip_if_all_rate_limited(failures, "Claude")
         assert not failures, "Claude launch failures:\n" + "\n".join(failures)
 
 
@@ -918,6 +965,7 @@ class TestGeminiLaunch:
             if not ok:
                 failures.append(f"model={model} err={err}")
 
+        _skip_if_all_rate_limited(failures, "Gemini")
         assert not failures, "Gemini launch failures:\n" + "\n".join(failures)
 
 
@@ -982,7 +1030,6 @@ class TestOpencodeLaunch:
         monkeypatch.setattr(opencode, "OPENCODE_BACKUP_PATH", backup_path)
 
         import sys
-        import time
 
         print(f"\n[opencode-per-model] {len(models)} models to test", flush=True)
         failures = []
@@ -1007,7 +1054,9 @@ class TestOpencodeLaunch:
             print(f"[opencode-per-model] -> {provider}/{model}", flush=True)
             t0 = time.monotonic()
             try:
-                result = _run_agent(cmd, env=opencode.build_runtime_env(e2e_token), timeout=180)
+                result = _run_agent_retrying_rate_limits(
+                    cmd, env=opencode.build_runtime_env(e2e_token), timeout=180
+                )
             except subprocess.TimeoutExpired as exc:
                 elapsed = time.monotonic() - t0
                 partial_stdout = (exc.stdout or b"").decode("utf-8", errors="replace")
@@ -1035,6 +1084,7 @@ class TestOpencodeLaunch:
                     f"stdout={result.stdout[:300]!r} stderr={result.stderr[:300]!r}"
                 )
 
+        _skip_if_all_rate_limited(failures, "OpenCode")
         assert not failures, "OpenCode launch failures:\n" + "\n".join(failures)
 
     def test_launch_deepseek_v4_pro(
@@ -1187,7 +1237,7 @@ class TestCopilotLaunch:
 
             env = copilot.build_runtime_env(e2e_workspace, model, e2e_token)
             cmd = copilot.validate_cmd("copilot")
-            result = _run_agent(cmd, env=env, timeout=120)
+            result = _run_agent_retrying_rate_limits(cmd, env=env, timeout=120)
             combined = (result.stdout + result.stderr).strip()
             if result.returncode != 0 or not combined:
                 failures.append(
@@ -1195,6 +1245,7 @@ class TestCopilotLaunch:
                     f"stdout={result.stdout[:300]!r} stderr={result.stderr[:300]!r}"
                 )
 
+        _skip_if_all_rate_limited(failures, "Copilot")
         assert not failures, "Copilot launch failures:\n" + "\n".join(failures)
 
 
@@ -1263,7 +1314,7 @@ class TestPiLaunch:
 
             env = pi.build_runtime_env(e2e_token)
             cmd = pi.validate_cmd("pi")
-            result = _run_agent(cmd, env=env, timeout=120)
+            result = _run_agent_retrying_rate_limits(cmd, env=env, timeout=120)
             combined = (result.stdout + result.stderr).strip()
             if result.returncode != 0 or not combined:
                 failures.append(
@@ -1271,6 +1322,7 @@ class TestPiLaunch:
                     f"stdout={result.stdout[:300]!r} stderr={result.stderr[:300]!r}"
                 )
 
+        _skip_if_all_rate_limited(failures, "Pi")
         assert not failures, "Pi launch failures:\n" + "\n".join(failures)
 
 
