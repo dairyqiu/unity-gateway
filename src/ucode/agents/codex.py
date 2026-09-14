@@ -15,7 +15,6 @@ from ucode.codex_config import (
     codex_config_args,
     codex_config_precedence_paths,
     codex_managed_config_path,
-    custom_catalog_models,
 )
 from ucode.config_io import (
     APP_DIR,
@@ -46,10 +45,8 @@ from ucode.managed_files import (
 from ucode.smart_routing import v2 as smart_routing_v2
 from ucode.smart_routing.codex_hooks import (
     remove_smart_routing_hooks,
-    routing_models,
     sync_smart_routing_hooks,
 )
-from ucode.smart_routing.codex_routing import codex_model_id
 from ucode.state import mark_tool_managed, save_state
 from ucode.telemetry import agent_version, ucode_version
 from ucode.ui import print_warning_err
@@ -69,7 +66,6 @@ MINIMUM_ROUTING_CODEX_VERSION = (0, 145, 0)
 MINIMUM_ROUTING_CODEX_VERSION_TEXT = "0.145.0"
 # Retained only to identify and remove state written by the legacy persisted opt-in.
 SMART_ROUTING_STATE_KEY = smart_routing_v2.LEGACY_STATE_KEY
-APP_SERVER_SMART_ROUTING_STARTING_MODEL = "gpt-5.6-luna"
 
 SPEC: ToolSpec = {
     "binary": "codex",
@@ -577,18 +573,11 @@ def _launch_smart_routing(state: dict, tool_args: list[str]) -> None:
         )
 
     configured_model = _smart_routing_config_model(state)
-    # Prefer the custom catalog if it exists.
-    models = custom_catalog_models() or routing_models(state)
-    start_model = (
-        configured_model
-        or (codex_model_id(models[0]) if models else None)
-        or APP_SERVER_SMART_ROUTING_STARTING_MODEL
-    )
     smart_routing_v2.launch_codex(
         state,
         tool_args,
         binary=binary,
-        start_model=start_model,
+        start_model=configured_model,
         render_overlay=render_overlay,
     )
 

@@ -62,7 +62,7 @@ def custom_catalog_models() -> list[str] | None:
             return slugs
         print_warning(
             f"Codex smart routing could not read models from the custom catalog {catalog_ref} "
-            f"referenced by {path}; falling back to the cached model services."
+            f"referenced by {path}; falling back to the AI Gateway Codex model catalog."
         )
         return None
     return None

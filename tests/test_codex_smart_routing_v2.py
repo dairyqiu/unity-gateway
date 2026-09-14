@@ -102,7 +102,7 @@ class TestLaunchCodex:
 
         assert launches == [["codex", "--config", 'model_provider="ucode-databricks"', *tool_args]]
 
-    def test_codex_launch_normalizes_cached_bootstrap_model(self, monkeypatch):
+    def test_codex_launch_defers_gateway_model_selection(self, monkeypatch):
         calls = []
         monkeypatch.setenv(v2.ENV_VAR, "1")
         monkeypatch.setattr(codex, "clear_model_preferences", lambda state: False)
@@ -121,7 +121,7 @@ class TestLaunchCodex:
                 options=LaunchOptions(launch_smart_routing=True),
             )
 
-        assert calls[0]["start_model"] == "gpt-5.6-luna"
+        assert calls[0]["start_model"] is None
 
     @pytest.mark.parametrize("custom_home", [False, True])
     @pytest.mark.parametrize(
@@ -132,7 +132,7 @@ class TestLaunchCodex:
             ("", "", 'model = "user"', "user"),
             ('model = " "', "model = 12", 'model = "user"', "user"),
             ("", "invalid toml", 'model = "user"', "user"),
-            (None, None, None, "gpt-5.6-luna"),
+            (None, None, None, None),
         ],
     )
     def test_startup_config_precedence(
@@ -203,6 +203,11 @@ class TestLaunchCodex:
             return f"token-{len(token_calls)}"
 
         monkeypatch.setattr(v2, "get_databricks_token", get_token)
+        monkeypatch.setattr(
+            v2,
+            "list_codex_models",
+            lambda workspace, token: (["gpt-6-astra", "gpt-6-b"], None),
+        )
         monkeypatch.setattr(v2, "_free_port", lambda: 41001)
         monkeypatch.setattr(v2, "_wait_for_app_server", lambda port, timeout: True)
 
@@ -245,8 +250,10 @@ class TestLaunchCodex:
         assert "codex-router-hook route-subagent" in hook_override
         assert f"--host {WS}" in hook_override
         assert "--profile myprof" in hook_override
-        assert "--model system.ai.gpt-5-6-sol" in hook_override
-        assert "--model system.ai.glm-5-2" in hook_override
+        assert "--model gpt-6-astra" in hook_override
+        assert "--model gpt-6-b" in hook_override
+        assert "system.ai.gpt-5-6-sol" not in hook_override
+        assert "system.ai.glm-5-2" not in hook_override
         assert processes[0].argv[10:] == [
             "--listen",
             "ws://127.0.0.1:41001",
@@ -263,8 +270,8 @@ class TestLaunchCodex:
         ]
         assert interposer_args["args"] == (v2.LOOPBACK_HOST, "ws://127.0.0.1:41001")
         assert interposer_args["kwargs"]["available_models"] == [
-            "system.ai.gpt-5-6-sol",
-            "system.ai.glm-5-2",
+            "gpt-6-astra",
+            "gpt-6-b",
         ]
         assert interposer_args["kwargs"]["workspace"] == WS
         assert token_calls == [(WS, "myprof")]
@@ -324,15 +331,20 @@ class TestLaunchCodex:
         assert "--model system.ai.gpt-5-6-sol" in routing_commands[0]
         assert "--model old" not in routing_commands[0]
 
-    def test_missing_cached_models_starts_with_bootstrap_model(self, monkeypatch):
+    def test_gateway_catalog_selects_starting_model(self, monkeypatch):
+        processes = []
         monkeypatch.setattr(v2, "get_databricks_token", lambda workspace, profile: "token")
+        monkeypatch.setattr(
+            v2,
+            "list_codex_models",
+            lambda workspace, token: (["system.ai.gpt-5-6-sol"], None),
+        )
         monkeypatch.setattr(codex, "agent_version", lambda binary: "unknown")
         monkeypatch.setattr(v2, "_free_port", lambda: 41001)
         monkeypatch.setattr(v2, "_wait_for_app_server", lambda port, timeout: True)
-        monkeypatch.setattr(
-            v2.subprocess,
-            "Popen",
-            lambda *args, **kwargs: type(
+        def popen(argv, **kwargs):
+            processes.append(argv)
+            return type(
                 "Process",
                 (),
                 {
@@ -340,8 +352,9 @@ class TestLaunchCodex:
                     "terminate": lambda self: None,
                     "kill": lambda self: None,
                 },
-            )(),
-        )
+            )()
+
+        monkeypatch.setattr(v2.subprocess, "Popen", popen)
         monkeypatch.setattr(
             codex_interposer,
             "start_interposer_thread",
@@ -353,11 +366,13 @@ class TestLaunchCodex:
                 {"workspace": WS},
                 [],
                 binary="codex",
-                start_model="gpt-5.6-luna",
+                start_model=None,
                 render_overlay=codex.render_overlay,
             )
 
         assert exc.value.code == 0
+        assert 'model="gpt-5.6-sol"' in processes[0]
+        assert processes[1][-2:] == ["--model", "gpt-5.6-sol"]
 
 
 class TestCustomCatalogModels:
@@ -425,7 +440,7 @@ class TestCustomCatalogModels:
 
         assert codex_config.custom_catalog_models() is None
         assert len(warnings) == 1
-        assert "falling back to the cached model services" in warnings[0]
+        assert "falling back to the AI Gateway Codex model catalog" in warnings[0]
 
     def test_launch_prefers_catalog_over_cached_models(self, tmp_path, monkeypatch):
         self._settings(
@@ -467,7 +482,7 @@ class TestCustomCatalogModels:
                 {"workspace": WS, "codex_models": ["system.ai.gpt-5-6-sol"]},
                 [],
                 binary="codex",
-                start_model="gpt-6-astra",
+                start_model=None,
                 render_overlay=codex.render_overlay,
             )
 
@@ -476,28 +491,7 @@ class TestCustomCatalogModels:
         assert "--model gpt-6-astra" in hook_override
         assert "--model gpt-6-b" in hook_override
         assert "gpt-5-6-sol" not in hook_override
-
-    def test_start_model_comes_from_custom_catalog(self, monkeypatch):
-        calls = []
-        monkeypatch.setenv(v2.ENV_VAR, "1")
-        monkeypatch.setattr(codex, "clear_model_preferences", lambda state: False)
-        monkeypatch.setattr(codex, "_smart_routing_config_model", lambda state: None)
-        monkeypatch.setattr(codex, "custom_catalog_models", lambda: ["gpt-6-astra", "gpt-6-b"])
-
-        def launch_v2(state, tool_args, **kwargs):
-            calls.append(kwargs)
-            raise SystemExit(0)
-
-        monkeypatch.setattr(v2, "launch_codex", launch_v2)
-
-        with pytest.raises(SystemExit):
-            codex.launch(
-                {"workspace": WS, "codex_models": ["system.ai.gpt-5-6-luna"]},
-                [],
-                options=LaunchOptions(launch_smart_routing=True),
-            )
-
-        assert calls[0]["start_model"] == "gpt-6-astra"
+        assert launched[1][-2:] == ["--model", "gpt-6-astra"]
 
 
 def test_interposer_startup_failure_is_propagated(monkeypatch):

@@ -27,6 +27,7 @@ from ucode.databricks import (
     get_databricks_token,
     list_anthropic_model_catalog,
     list_anthropic_models,
+    list_codex_models,
 )
 from ucode.smart_routing import claude_routing, codex_interposer, routing
 from ucode.smart_routing.claude_hooks import (
@@ -34,7 +35,8 @@ from ucode.smart_routing.claude_hooks import (
     sync_first_prompt_hook,
     sync_smart_routing_hooks,
 )
-from ucode.smart_routing.codex_hooks import merge_pre_tool_use_hooks, routing_models
+from ucode.smart_routing.codex_hooks import merge_pre_tool_use_hooks
+from ucode.smart_routing.codex_routing import codex_model_id
 from ucode.ui import print_note
 
 ENV_VAR = "ENABLE_SMART_ROUTING_V2"
@@ -469,12 +471,6 @@ def launch_claude(
     sys.exit(returncode)
 
 
-# TODO: Replace with /codex/v1/models once /codex/v1/models can send GPT models as well.
-def _cached_routing_models(state: dict) -> list[str]:
-    """Return the persisted UC model-service ids usable by Codex routing."""
-    return routing_models(state)
-
-
 def _codex_home_config_path() -> Path:
     codex_home = os.environ.get("CODEX_HOME")
     if codex_home:
@@ -506,24 +502,38 @@ def launch_codex(
         raise RuntimeError(
             "Smart routing needs a configured workspace; run `ucode configure codex` first."
         )
-    if not start_model:
-        raise RuntimeError(
-            "Smart routing could not determine a starting Codex model for this workspace."
-        )
-
     profile = state.get("profile")
-    os.environ[OAUTH_TOKEN_ENV_VAR] = get_databricks_token(workspace, profile)
+    token = get_databricks_token(workspace, profile)
+    os.environ[OAUTH_TOKEN_ENV_VAR] = token
     catalog_models = custom_catalog_models()
-    available_models = catalog_models or _cached_routing_models(state)
+    discovery_error = None
+    if catalog_models:
+        available_models = catalog_models
+    else:
+        available_models, discovery_error = list_codex_models(workspace, token)
     if catalog_models:
         print_note(
             f"Smart routing: routing across {len(catalog_models)} models from the configured "
             "Codex custom catalog (model_catalog_json); cached model services are not used."
         )
+    elif available_models:
+        print_note(
+            f"Smart routing: routing across {len(available_models)} models from the AI Gateway "
+            "Codex model catalog."
+        )
+    start_model = start_model or (
+        codex_model_id(available_models[0]) if available_models else None
+    )
+    if not start_model:
+        raise RuntimeError(
+            "Smart routing could not determine a starting Codex model from "
+            f"{workspace}/ai-gateway/codex/v1/models"
+            + (f": {discovery_error}" if discovery_error else ".")
+        )
     if not available_models:
         print_note(
             f"Smart routing model metadata is unavailable; starting Codex on {start_model} "
-            "without automatic model switching. Run `ucode configure codex` to enable routing."
+            "without automatic model switching."
         )
     overlay = render_overlay(
         workspace,
