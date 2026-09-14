@@ -90,6 +90,14 @@ class TestHelp:
         for tool in TOOLS:
             assert tool in result.output
 
+    def test_managed_authoring_commands_are_removed(self):
+        # Authoring moved to the AI Gateway API/UI, so `ug setup` and `ug publish` no longer exist.
+        assert runner.invoke(app, ["setup"]).exit_code != 0
+        assert runner.invoke(app, ["setup", "mcps"]).exit_code != 0
+        assert runner.invoke(app, ["publish"]).exit_code != 0
+        # `ug export` (read-only) stays.
+        assert runner.invoke(app, ["export", "--help"]).exit_code == 0
+
     @pytest.mark.parametrize("prog_name", ["ug", "ucode"])
     def test_help_uses_invoked_name_and_names_ucode_as_an_alias(self, prog_name):
         result = runner.invoke(app, ["--help"], prog_name=prog_name)
@@ -459,6 +467,25 @@ class TestSubcommandRouting:
         assert "ENABLE_SMART_ROUTING_V2" not in os.environ
         assert mock_launch.call_args.args[1].args == []
 
+    @pytest.mark.parametrize("tool, subcommand", [("codex", "app"), ("claude", "update")])
+    def test_native_subcommand_suppresses_inherited_smart_routing(
+        self, monkeypatch, tool, subcommand
+    ):
+        monkeypatch.setenv("ENABLE_SMART_ROUTING_V2", "1")
+        observed = []
+
+        with patch(
+            "ucode.cli._launch_tool",
+            side_effect=lambda *_args, **_kwargs: observed.append(
+                os.environ.get("ENABLE_SMART_ROUTING_V2")
+            ),
+        ):
+            result = runner.invoke(app, [tool, subcommand])
+
+        assert result.exit_code == 0, result.output
+        assert observed == [None]
+        assert os.environ["ENABLE_SMART_ROUTING_V2"] == "1"
+
     def test_claude_enable_smart_routing_forwards_positional_prompt_to_v2(self):
         captured = []
 
@@ -590,6 +617,39 @@ class TestSubcommandRouting:
         assert result.exit_code == 0, result.output
         assert os.environ["ENABLE_CLAUDE_CODE_GATEWAY_MODEL_DISCOVERY"] == "1"
         assert mock_launch.call_args.args[1].args == []
+
+    def test_claude_parent_is_forwarded(self):
+        with patch("ucode.cli._launch_tool") as mock_launch:
+            result = runner.invoke(app, ["claude", "--parent", "main.default"])
+
+        assert result.exit_code == 0, result.output
+        assert mock_launch.call_args.kwargs["parent_schema"] == "main.default"
+        assert os.environ["ENABLE_CLAUDE_CODE_GATEWAY_MODEL_DISCOVERY"] == "1"
+
+    def test_codex_parent_is_forwarded(self):
+        with patch("ucode.cli._launch_tool") as mock_launch:
+            result = runner.invoke(app, ["codex", "--parent", "main.default"])
+
+        assert result.exit_code == 0, result.output
+        assert mock_launch.call_args.kwargs["parent_schema"] == "main.default"
+
+    def test_codex_provider_and_parent_are_mutually_exclusive(self):
+        result = runner.invoke(
+            app,
+            ["codex", "--provider", "main.default.provider", "--parent", "main.default"],
+        )
+
+        assert result.exit_code == 1
+        assert "--provider and --parent cannot be used together" in result.output
+
+    def test_claude_provider_and_parent_are_mutually_exclusive(self):
+        result = runner.invoke(
+            app,
+            ["claude", "--provider", "main.default.provider", "--parent", "main.default"],
+        )
+
+        assert result.exit_code == 1
+        assert "--provider and --parent cannot be used together" in result.output
 
     def test_claude_enable_model_discovery_is_hidden_from_help(self):
         result = runner.invoke(app, ["claude", "--help"])
@@ -1017,6 +1077,23 @@ class TestClaudeModelFlag:
 
         assert result.exit_code == 0, result.output
         assert mock_launch.call_args.args[1]["_claude_launch_provider"] == "main.default.anthropic"
+
+    def test_provider_sets_transient_codex_launch_marker(self):
+        state = dict(MINIMAL_STATE)
+        with (
+            patch("ucode.cli.ensure_bootstrap_dependencies"),
+            patch("ucode.cli.load_state", return_value=state),
+            patch("ucode.cli.ensure_provider_state", return_value=state),
+            patch("ucode.cli.configure_shared_state", return_value=state),
+            patch("ucode.cli.resolve_provider_models", return_value=(None, None, False)),
+            patch("ucode.cli.configure_tool", return_value=state),
+            patch("ucode.cli._fetch_managed_config", return_value=(None, False)),
+            patch("ucode.cli.launch_agent") as mock_launch,
+        ):
+            result = runner.invoke(app, ["codex", "--provider", "main.default.openai"])
+
+        assert result.exit_code == 0, result.output
+        assert mock_launch.call_args.args[1]["_codex_launch_provider"] == "main.default.openai"
 
 
 class TestGeminiProviderLaunch:
@@ -3573,7 +3650,6 @@ class TestBareUcode:
         monkeypatch,
         *,
         managed,
-        is_admin=False,
         args=None,
         cached=None,
         coding_agent_config_feature_disabled=False,
@@ -3589,8 +3665,6 @@ class TestBareUcode:
             monkeypatch.setattr("ucode.cli.refresh_managed_config", lambda state: (managed, False))
 
         monkeypatch.setattr("ucode.cli.load_managed_state", lambda ws: cached)
-        monkeypatch.setattr("ucode.cli.get_databricks_token", lambda *a, **k: "tok")
-        monkeypatch.setattr("ucode.cli.is_workspace_admin", lambda *a, **k: is_admin)
         monkeypatch.setattr(
             "ucode.cli._launch_tool",
             lambda tool, ctx, **kw: launched.append((tool, kw)),
@@ -3641,21 +3715,20 @@ class TestBareUcode:
         assert "launching OpenCode" in result.output
         assert "as the default agent" not in result.output
 
-    def test_admin_without_a_config_is_pointed_at_setup(self, monkeypatch):
-        result, launched = self._run(monkeypatch, managed=None, is_admin=True)
+    def test_no_config_points_the_dev_at_configure(self, monkeypatch):
+        # With no managed config a developer can still set up locally, so the guidance points at
+        # `ug configure` (not the removed authoring commands).
+        result, launched = self._run(monkeypatch, managed=None)
         assert result.exit_code == 0, result.output
         assert launched == []
-        assert "ug setup" in result.output
-
-    def test_non_admin_without_a_config_is_told_to_ask(self, monkeypatch):
-        result, launched = self._run(monkeypatch, managed=None, is_admin=False)
-        assert result.exit_code == 0, result.output
-        assert launched == []
-        assert "Ask a workspace admin" in result.output
+        flat = " ".join(result.output.split())
+        assert "ug configure" in flat
+        assert "ug setup" not in flat
+        assert "ug publish" not in flat
 
     def test_feature_disabled_guides_without_managed_mention(self, monkeypatch):
         result, launched = self._run(
-            monkeypatch, managed=None, is_admin=True, coding_agent_config_feature_disabled=True
+            monkeypatch, managed=None, coding_agent_config_feature_disabled=True
         )
         assert result.exit_code == 0, result.output
         assert launched == []
@@ -3692,10 +3765,6 @@ class TestBareUcode:
             lambda state: pytest.fail("--dry-run must not fetch"),
         )
         monkeypatch.setattr("ucode.cli.load_managed_state", lambda ws: None)
-        # The no-config guidance checks admin status; stub the token/admin calls so the test
-        # doesn't shell out to the `databricks` binary (absent in CI).
-        monkeypatch.setattr("ucode.cli.get_databricks_token", lambda *a, **k: "tok")
-        monkeypatch.setattr("ucode.cli.is_workspace_admin", lambda *a, **k: False)
         monkeypatch.setattr(
             "ucode.cli._launch_tool",
             lambda *a, **k: pytest.fail("nothing to launch without a config"),
