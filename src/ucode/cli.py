@@ -149,6 +149,7 @@ from ucode.ui import (
     prompt_for_tools,
     prompt_for_workspace,
     prompt_yes_no,
+    redirect_output_to_stderr,
     set_verbosity,
     spinner,
     status_badge,
@@ -1981,6 +1982,16 @@ def _download_managed_skills(managed: dict, state: dict) -> None:
         print_note(f"Downloaded workspace skill(s) to disk: {', '.join(written)}")
 
 
+def _child_owns_stdout(tool: str, tool_args: list[str]) -> bool:
+    """True when the forwarded agent command speaks a stdio protocol on stdout.
+
+    ``codex app-server`` puts its JSON-RPC stream on stdout, so ug's status
+    output must move to stderr for that launch; the file descriptor stays
+    untouched for the agent process.
+    """
+    return tool == "codex" and tool_args[:1] == ["app-server"]
+
+
 def _should_launch_smart_routing(
     tool: str,
     tool_args: list[str],
@@ -2038,6 +2049,10 @@ def _launch_tool(
 ) -> None:
     try:
         tool = normalize_tool(tool_name)
+        # Before any status print: a stdio-protocol subcommand owns stdout, so
+        # every ug line from here on must go to stderr instead.
+        if _child_owns_stdout(tool, ctx.args):
+            redirect_output_to_stderr()
         explicit_prompt = _has_explicit_prompt(ctx)
         smart_routing_enabled = smart_routing_v2.enabled()
         # Launchers such as isaac put their harness arguments after `--`, so the harness's own
