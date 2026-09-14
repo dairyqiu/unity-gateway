@@ -31,7 +31,16 @@ DECISIONS_PATH = APP_DIR / "codex-smart-routing-decisions.jsonl"
 
 _GPT_RE = re.compile(r"gpt-(\d+)(?:[.-](\d+))?(?:[.-](\d+))?(-.+|[a-z].*)?")
 
-_normalize_model = routing.normalize_model
+
+def routing_model_id(model: str) -> str:
+    """Normalize gateway IDs and dotted harness GPT slugs to the same router arm."""
+    normalized = routing.normalize_model(model)
+    match = _GPT_RE.fullmatch(normalized)
+    if match is None:
+        return normalized
+    major, minor, patch, suffix = match.groups()
+    version = "-".join(part for part in (major, minor, patch) if part is not None)
+    return f"gpt-{version}{suffix or ''}"
 
 
 def request_routing_decision(
@@ -44,10 +53,10 @@ def request_routing_decision(
     log: Callable[[str], None] | None = None,
 ) -> tuple[RoutingDecision | None, str | None]:
     """Ask the router for a servable Codex model."""
-    available = {_normalize_model(model): model for model in available_models}
+    available = {routing_model_id(model): model for model in available_models}
     route_options = [(model, "codex") for model in available]
     if not route_options:
-        return None, "no cached model services are available"
+        return None, "no models are available for Codex routing"
     router_name = routing.configured_router_name()
     if log is not None:
         payload = {
@@ -64,7 +73,7 @@ def request_routing_decision(
         token,
         task,
         route_options,
-        lambda raw_model: available.get(_normalize_model(raw_model)),
+        lambda raw_model: available.get(routing_model_id(raw_model)),
         router_name=router_name,
         timeout=timeout,
     )
@@ -72,8 +81,8 @@ def request_routing_decision(
 
 def resolve_routed_model(raw_model: str, available_models: list[str]) -> str | None:
     """Map a router arm to a model the configured workspace can serve."""
-    normalized = {_normalize_model(model): model for model in available_models}
-    return normalized.get(_normalize_model(raw_model))
+    normalized = {routing_model_id(model): model for model in available_models}
+    return normalized.get(routing_model_id(raw_model))
 
 
 def route_pre_tool_use(
@@ -128,7 +137,7 @@ def clear_routing_artifacts() -> None:
 
 
 def _parse_gpt(model: str) -> tuple[int, int, int, str] | None:
-    match = _GPT_RE.fullmatch(_normalize_model(model))
+    match = _GPT_RE.fullmatch(routing_model_id(model))
     if not match:
         return None
     major, minor, patch, suffix = match.groups()

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
 import json
+import shlex
+import tomllib
+from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 
@@ -176,6 +180,15 @@ class TestLaunchCodex:
         monkeypatch.setenv("CODEX_HOME", "/user/codex-home")
         monkeypatch.setattr(codex, "ucode_version", lambda: "0.1.0")
         monkeypatch.setattr(codex, "agent_version", lambda binary: "0.148.0")
+        monkeypatch.setattr(v2, "custom_catalog_models", lambda: None)
+        harness_calls = []
+
+        def harness_models(app_server_url):
+            assert len(processes) == 1
+            harness_calls.append(app_server_url)
+            return ["gpt-5.5", "gpt-5.6-sol"], None
+
+        monkeypatch.setattr(codex, "list_harness_models", harness_models)
 
         class FakeProcess:
             def __init__(self, argv, **kwargs):
@@ -206,7 +219,7 @@ class TestLaunchCodex:
         monkeypatch.setattr(
             v2,
             "list_codex_models",
-            lambda workspace, token: (["gpt-6-astra", "gpt-6-b"], None),
+            lambda workspace, token: (["system.ai.glm-5-3", "system.ai.gpt-5-6-sol"], None),
         )
         monkeypatch.setattr(v2, "_free_port", lambda: 41001)
         monkeypatch.setattr(v2, "_wait_for_app_server", lambda port, timeout: True)
@@ -214,6 +227,11 @@ class TestLaunchCodex:
         def start_interposer(*args, **kwargs):
             interposer_args["args"] = args
             interposer_args["kwargs"] = kwargs
+            hook = tomllib.loads(processes[0].argv[9])["hooks"]["PreToolUse"][0]["hooks"][0]
+            hook_args = shlex.split(hook["command"])
+            models_file = Path(hook_args[hook_args.index("--models-file") + 1])
+            interposer_args["models_file"] = models_file
+            assert json.loads(models_file.read_text())["models"] == kwargs["available_models"]
             return 41002, lambda: stopped.append(True)
 
         monkeypatch.setattr(codex_interposer, "start_interposer_thread", start_interposer)
@@ -250,8 +268,7 @@ class TestLaunchCodex:
         assert "codex-router-hook route-subagent" in hook_override
         assert f"--host {WS}" in hook_override
         assert "--profile myprof" in hook_override
-        assert "--model gpt-6-astra" in hook_override
-        assert "--model gpt-6-b" in hook_override
+        assert "--models-file" in hook_override
         assert "system.ai.gpt-5-6-sol" not in hook_override
         assert "system.ai.glm-5-2" not in hook_override
         assert processes[0].argv[10:] == [
@@ -270,9 +287,13 @@ class TestLaunchCodex:
         ]
         assert interposer_args["args"] == (v2.LOOPBACK_HOST, "ws://127.0.0.1:41001")
         assert interposer_args["kwargs"]["available_models"] == [
-            "gpt-6-astra",
-            "gpt-6-b",
+            "system.ai.glm-5-3",
+            "gpt-5.6-sol",
+            "gpt-5.5",
         ]
+        assert harness_calls == ["ws://127.0.0.1:41001"]
+        assert len(processes) == 2
+        assert not interposer_args["models_file"].exists()
         assert interposer_args["kwargs"]["workspace"] == WS
         assert token_calls == [(WS, "myprof")]
         assert interposer_args["kwargs"]["token_provider"]() == "token-2"
@@ -331,17 +352,23 @@ class TestLaunchCodex:
         assert "--model system.ai.gpt-5-6-sol" in routing_commands[0]
         assert "--model old" not in routing_commands[0]
 
-    def test_gateway_catalog_selects_starting_model(self, monkeypatch):
+    @pytest.mark.parametrize(
+        ("gateway", "harness"),
+        [
+            ((["system.ai.gpt-5-6-sol"], None), ([], "harness unavailable")),
+            (([], "gateway unavailable"), (["gpt-5.6-sol"], None)),
+        ],
+    )
+    def test_available_catalog_selects_starting_model(self, monkeypatch, gateway, harness):
         processes = []
+        monkeypatch.setattr(v2, "custom_catalog_models", lambda: None)
         monkeypatch.setattr(v2, "get_databricks_token", lambda workspace, profile: "token")
-        monkeypatch.setattr(
-            v2,
-            "list_codex_models",
-            lambda workspace, token: (["system.ai.gpt-5-6-sol"], None),
-        )
+        monkeypatch.setattr(v2, "list_codex_models", lambda workspace, token: gateway)
+        monkeypatch.setattr(codex, "list_harness_models", lambda *_args: harness)
         monkeypatch.setattr(codex, "agent_version", lambda binary: "unknown")
         monkeypatch.setattr(v2, "_free_port", lambda: 41001)
         monkeypatch.setattr(v2, "_wait_for_app_server", lambda port, timeout: True)
+
         def popen(argv, **kwargs):
             processes.append(argv)
             return type(
@@ -371,8 +398,30 @@ class TestLaunchCodex:
             )
 
         assert exc.value.code == 0
-        assert 'model="gpt-5.6-sol"' in processes[0]
+        if gateway[0]:
+            assert 'model="gpt-5.6-sol"' in processes[0]
         assert processes[1][-2:] == ["--model", "gpt-5.6-sol"]
+
+    def test_empty_catalogs_do_not_fall_back_to_cached_models(self, monkeypatch):
+        monkeypatch.setattr(v2, "custom_catalog_models", lambda: None)
+        monkeypatch.setattr(v2, "get_databricks_token", lambda *_args: "token")
+        monkeypatch.setattr(v2, "list_codex_models", lambda *_args: ([], "gateway unavailable"))
+        monkeypatch.setattr(
+            codex, "list_harness_models", lambda *_args: ([], "harness unavailable")
+        )
+        process = Mock()
+        monkeypatch.setattr(v2.subprocess, "Popen", lambda *_args, **_kwargs: process)
+        monkeypatch.setattr(v2, "_wait_for_app_server", lambda *_args, **_kwargs: True)
+
+        with pytest.raises(RuntimeError, match="Check workspace authentication"):
+            v2.launch_codex(
+                {"workspace": WS, "codex_models": ["stale"]},
+                [],
+                binary="codex",
+                start_model=None,
+                render_overlay=lambda *_args, **_kwargs: {},
+            )
+        process.terminate.assert_called_once()
 
 
 class TestCustomCatalogModels:
@@ -449,6 +498,10 @@ class TestCustomCatalogModels:
             cli=self._catalog(tmp_path / "cli.json", ["gpt-6-astra", "gpt-6-b"]),
         )
         monkeypatch.setattr(v2, "get_databricks_token", lambda *_args: "token")
+        monkeypatch.setattr(
+            codex, "list_harness_models", lambda *_args: pytest.fail("queried harness")
+        )
+        monkeypatch.setattr(v2, "list_codex_models", lambda *_args: pytest.fail("queried gateway"))
         monkeypatch.setattr(v2, "_free_port", lambda: 41001)
         monkeypatch.setattr(v2, "_wait_for_app_server", lambda port, timeout: True)
         monkeypatch.setattr(codex, "agent_version", lambda _binary: "0.145.0")

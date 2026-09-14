@@ -8,6 +8,7 @@ import signal
 import socket
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.request
 import uuid
@@ -36,8 +37,8 @@ from ucode.smart_routing.claude_hooks import (
     sync_smart_routing_hooks,
 )
 from ucode.smart_routing.codex_hooks import merge_pre_tool_use_hooks
-from ucode.smart_routing.codex_routing import codex_model_id
-from ucode.ui import print_note
+from ucode.smart_routing.codex_routing import codex_model_id, routing_model_id
+from ucode.ui import print_note, print_warning
 
 ENV_VAR = "ENABLE_SMART_ROUTING_V2"
 LEGACY_STATE_KEY = "smart_routing_enabled"
@@ -478,7 +479,9 @@ def _codex_home_config_path() -> Path:
     return Path.home() / ".codex" / "config.toml"
 
 
-def _v2_pre_tool_use_hooks(state: dict, available_models: list[str]) -> list[dict]:
+def _v2_pre_tool_use_hooks(
+    state: dict, available_models: list[str], models_file: Path | None = None
+) -> list[dict]:
     doc = read_toml_safe(_codex_home_config_path())
     configured_hooks = doc.get("hooks")
     existing = configured_hooks.get("PreToolUse") if isinstance(configured_hooks, dict) else None
@@ -486,6 +489,7 @@ def _v2_pre_tool_use_hooks(state: dict, available_models: list[str]) -> list[dic
         existing if isinstance(existing, list) else [],
         state,
         available_models=available_models,
+        models_file=models_file,
     )
 
 
@@ -497,6 +501,8 @@ def launch_codex(
     start_model: str | None,
     render_overlay: Callable[..., dict],
 ) -> NoReturn:
+    from ucode.agents.codex import list_harness_models
+
     workspace = state.get("workspace")
     if not workspace:
         raise RuntimeError(
@@ -506,85 +512,100 @@ def launch_codex(
     token = get_databricks_token(workspace, profile)
     os.environ[OAUTH_TOKEN_ENV_VAR] = token
     catalog_models = custom_catalog_models()
-    discovery_error = None
     if catalog_models:
         available_models = catalog_models
     else:
         available_models, discovery_error = list_codex_models(workspace, token)
+        if discovery_error:
+            print_warning(f"Smart routing model discovery: {discovery_error}")
     if catalog_models:
         print_note(
             f"Smart routing: routing across {len(catalog_models)} models from the configured "
             "Codex custom catalog (model_catalog_json); cached model services are not used."
         )
-    elif available_models:
-        print_note(
-            f"Smart routing: routing across {len(available_models)} models from the AI Gateway "
-            "Codex model catalog."
-        )
-    start_model = start_model or (
-        codex_model_id(available_models[0]) if available_models else None
-    )
-    if not start_model:
-        raise RuntimeError(
-            "Smart routing could not determine a starting Codex model from "
-            f"{workspace}/ai-gateway/codex/v1/models"
-            + (f": {discovery_error}" if discovery_error else ".")
-        )
-    if not available_models:
-        print_note(
-            f"Smart routing model metadata is unavailable; starting Codex on {start_model} "
-            "without automatic model switching."
-        )
+    start_model = start_model or (codex_model_id(available_models[0]) if available_models else None)
     overlay = render_overlay(
         workspace,
         start_model,
-        state.get("profile"),
+        profile,
         use_pat=bool(state.get("use_pat")),
     )
-    overlay["hooks"] = {
-        "PreToolUse": _v2_pre_tool_use_hooks(state, available_models),
-    }
-    config_args = codex_config_args(overlay)
-    app_port = _free_port()
-    app_server_url = _loopback_websocket_url(app_port)
-
-    # Preserve the user's normal CODEX_HOME (including MCP servers, skills, and
-    # preferences) and layer only ucode's gateway settings at CLI precedence.
-    app_server = subprocess.Popen(
-        [binary, "app-server", *config_args, "--listen", app_server_url],
-        env=os.environ.copy(),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    stop_interposer = None
-    try:
-        if not _wait_for_app_server(app_port, timeout=APP_SERVER_READY_TIMEOUT_SECONDS):
-            raise RuntimeError(
-                "Codex app-server did not become ready for smart routing; check workspace auth."
-            )
-        tui_port, stop_interposer = codex_interposer.start_interposer_thread(
-            LOOPBACK_HOST,
-            app_server_url,
-            available_models=available_models,
-            workspace=workspace,
-            token_provider=lambda: get_databricks_token(workspace, profile),
-            switch_message_fn=format_routing_notice,
-            log_path=CODEX_INTERPOSER_LOG,
+    with tempfile.TemporaryDirectory(prefix="ug-codex-routing-") as session_dir:
+        models_file = Path(session_dir) / "models.json"
+        overlay["hooks"] = {
+            "PreToolUse": _v2_pre_tool_use_hooks(
+                state, available_models, None if catalog_models else models_file
+            ),
+        }
+        config_args = codex_config_args(overlay)
+        app_port = _free_port()
+        app_server_url = _loopback_websocket_url(app_port)
+        app_server = subprocess.Popen(
+            [binary, "app-server", *config_args, "--listen", app_server_url],
+            env=os.environ.copy(),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
         )
-        tui_url = _loopback_websocket_url(tui_port)
-        tui = subprocess.Popen([binary, "--remote", tui_url, "--model", start_model, *tool_args])
+        stop_interposer = None
         try:
-            returncode = tui.wait()
-        except KeyboardInterrupt:
-            tui.send_signal(signal.SIGINT)
-            returncode = tui.wait()
-    finally:
-        if stop_interposer is not None:
-            stop_interposer()
-        app_server.terminate()
-        try:
-            app_server.wait(timeout=PROCESS_SHUTDOWN_TIMEOUT_SECONDS)
-        except Exception:  # noqa: BLE001
-            app_server.kill()
+            if not _wait_for_app_server(app_port, timeout=APP_SERVER_READY_TIMEOUT_SECONDS):
+                raise RuntimeError(
+                    "Codex app-server did not become ready for smart routing; check workspace auth."
+                )
+            if not catalog_models:
+                harness_models, harness_error = list_harness_models(app_server_url)
+                available_models = list(
+                    {
+                        routing_model_id(model): model
+                        for model in [*available_models, *harness_models]
+                    }.values()
+                )
+                if harness_error:
+                    print_warning(f"Smart routing model discovery: {harness_error}")
+                write_json_file(models_file, {"models": available_models})
+                print_note(
+                    f"Smart routing: routing across {len(available_models)} models from "
+                    "AI Gateway and the Codex harness."
+                )
+            start_model = start_model or (
+                codex_model_id(available_models[0]) if available_models else None
+            )
+            if not start_model:
+                raise RuntimeError(
+                    "Smart routing could not determine a starting Codex model from AI Gateway "
+                    "or the Codex harness. Check workspace authentication and `codex --version`, "
+                    "then retry."
+                )
+            if not available_models:
+                print_warning(
+                    f"Smart routing model metadata is unavailable; starting Codex on {start_model} "
+                    "without automatic model switching."
+                )
+            tui_port, stop_interposer = codex_interposer.start_interposer_thread(
+                LOOPBACK_HOST,
+                app_server_url,
+                available_models=available_models,
+                workspace=workspace,
+                token_provider=lambda: get_databricks_token(workspace, profile),
+                switch_message_fn=format_routing_notice,
+                log_path=CODEX_INTERPOSER_LOG,
+            )
+            tui_url = _loopback_websocket_url(tui_port)
+            tui = subprocess.Popen(
+                [binary, "--remote", tui_url, "--model", start_model, *tool_args]
+            )
+            try:
+                returncode = tui.wait()
+            except KeyboardInterrupt:
+                tui.send_signal(signal.SIGINT)
+                returncode = tui.wait()
+        finally:
+            if stop_interposer is not None:
+                stop_interposer()
+            app_server.terminate()
+            try:
+                app_server.wait(timeout=PROCESS_SHUTDOWN_TIMEOUT_SECONDS)
+            except Exception:  # noqa: BLE001
+                app_server.kill()
     sys.exit(returncode)

@@ -742,6 +742,55 @@ class TestSubcommandRouting:
         assert json.loads(result.output) == routed
         return mock_token, mock_route
 
+    @pytest.mark.parametrize(
+        "contents", [None, "invalid json", '{"models":[null]}', '{"models":"bad"}']
+    )
+    def test_codex_subagent_hook_skips_unreadable_model_file(self, tmp_path, contents):
+        models_file = tmp_path / "models.json"
+        if contents is not None:
+            models_file.write_text(contents)
+        with patch("ucode.smart_routing.codex_routing.route_pre_tool_use") as route:
+            result = runner.invoke(
+                app,
+                [
+                    "codex-router-hook",
+                    "route-subagent",
+                    "--host",
+                    "https://example.com",
+                    "--models-file",
+                    str(models_file),
+                ],
+                input='{"tool_name":"spawn_agent","tool_input":{"message":"fix it"}}',
+                env={"ENABLE_SMART_ROUTING_V2": "1"},
+            )
+        assert result.exit_code == 0, result.output
+        route.assert_not_called()
+
+    def test_codex_subagent_hook_uses_session_model_file(self, tmp_path):
+        models = ["system.ai.glm-5-3", "gpt-5.5", "gpt-5.6-sol"]
+        models_file = tmp_path / "session models.json"
+        models_file.write_text(json.dumps({"models": models}))
+        with patch(
+            "ucode.smart_routing.codex_routing.route_pre_tool_use", return_value=None
+        ) as route:
+            result = runner.invoke(
+                app,
+                [
+                    "codex-router-hook",
+                    "route-subagent",
+                    "--host",
+                    "https://example.com",
+                    "--models-file",
+                    str(models_file),
+                    "--model",
+                    "stale",
+                ],
+                input='{"tool_name":"spawn_agent","tool_input":{"message":"fix it"}}',
+                env={"ENABLE_SMART_ROUTING_V2": "1", "DATABRICKS_BEARER": "token"},
+            )
+        assert result.exit_code == 0, result.output
+        assert route.call_args.kwargs["available_models"] == models
+
     def test_codex_subagent_hook_reuses_fresh_oauth_token(self, monkeypatch):
         monkeypatch.delenv("DATABRICKS_BEARER", raising=False)
         token = _jwt(time.time() + 300)

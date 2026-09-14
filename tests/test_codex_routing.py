@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import urllib.error
 
+import pytest
+
 from ucode.smart_routing import codex_routing
 from ucode.smart_routing.codex_hooks import routing_models
 
@@ -36,6 +38,33 @@ class _Response:
 
     def read(self) -> bytes:
         return json.dumps(self.payload).encode("utf-8")
+
+
+@pytest.mark.parametrize("selected", ["gpt-5-6-sol", "gpt-5.6-sol", "glm-5-3"])
+def test_routes_with_union_of_gateway_and_harness_models(monkeypatch, selected):
+    captured = {}
+
+    def fake_urlopen(request, timeout):
+        captured["url"] = request.full_url
+        captured["body"] = json.loads(request.data)
+        return _Response({"route_selection": [{"route_option": {"model": selected}}]})
+
+    monkeypatch.setattr(codex_routing.urllib.request, "urlopen", fake_urlopen)
+    decision, error = codex_routing.request_routing_decision(
+        WS,
+        "token",
+        "Fix the parser",
+        ["system.ai.glm-5-3", "system.ai.gpt-5-6-sol", "gpt-5.5", "gpt-5.6-sol"],
+    )
+
+    assert error is None
+    assert decision.model == ("system.ai.glm-5-3" if selected == "glm-5-3" else "gpt-5.6-sol")
+    assert captured["url"] == f"{WS}/ai-gateway/routing/v1/routes:select"
+    assert captured["body"]["route_options"] == [
+        {"model": "glm-5-3", "harness": "codex"},
+        {"model": "gpt-5-6-sol", "harness": "codex"},
+        {"model": "gpt-5-5", "harness": "codex"},
+    ]
 
 
 def test_routes_with_models_from_stored_state(monkeypatch):

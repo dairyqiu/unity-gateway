@@ -1584,6 +1584,7 @@ def codex_router_hook_cmd(
     profile: Annotated[str | None, typer.Option("--profile")] = None,
     use_pat: Annotated[bool, typer.Option("--use-pat")] = False,
     model: Annotated[list[str] | None, typer.Option("--model")] = None,
+    models_file: Annotated[str | None, typer.Option("--models-file")] = None,
 ) -> None:
     """Run a Codex smart-routing lifecycle hook."""
     import json
@@ -1634,6 +1635,17 @@ def codex_router_hook_cmd(
         return
     if event != "route-subagent" or not host:
         return
+    if models_file is not None:
+        from pathlib import Path
+
+        from ucode.config_io import read_json_safe
+
+        models = read_json_safe(Path(models_file)).get("models")
+        if not isinstance(models, list) or not all(
+            isinstance(entry, str) and entry.strip() for entry in models
+        ):
+            return
+        model = models
     if use_pat and not ensure_pat_bearer(profile):
         return
     token = os.environ.get("DATABRICKS_BEARER", "").strip()

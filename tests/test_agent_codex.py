@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -13,6 +15,99 @@ from ucode.config_io import read_toml_safe
 from ucode.smart_routing import codex_routing
 
 WS = "https://example.databricks.com"
+
+
+class TestHarnessModels:
+    def _connection(self, monkeypatch, replies):
+        connection = MagicMock()
+        connection.__enter__.return_value = connection
+        connection.recv.side_effect = replies
+        connect = MagicMock(return_value=connection)
+        monkeypatch.setattr(codex, "connect", connect)
+        monkeypatch.setattr(codex, "ucode_version", lambda: "test")
+        return connection, connect
+
+    def test_queries_existing_server_and_paginates(self, monkeypatch):
+        connection, connect = self._connection(
+            monkeypatch,
+            [
+                json.dumps({"id": 0, "result": {}}),
+                json.dumps({"method": "configWarning", "params": {}}),
+                json.dumps(
+                    {
+                        "id": 1,
+                        "result": {
+                            "data": [
+                                {"id": "picker-id", "model": "gpt-5.5"},
+                                {"model": "hidden", "hidden": True},
+                                {"model": ""},
+                                {"model": 12},
+                                None,
+                            ],
+                            "nextCursor": "page-2",
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "id": 2,
+                        "result": {
+                            "data": [{"model": "gpt-5.6-sol"}, {"model": "gpt-5.5"}],
+                            "nextCursor": None,
+                        },
+                    }
+                ),
+            ],
+        )
+
+        assert codex.list_harness_models("ws://127.0.0.1:41001") == (
+            ["gpt-5.5", "gpt-5.6-sol"],
+            None,
+        )
+        assert connect.call_args.args == ("ws://127.0.0.1:41001",)
+        sent = [json.loads(call.args[0]) for call in connection.send.call_args_list]
+        assert [message["method"] for message in sent] == [
+            "initialize",
+            "initialized",
+            "model/list",
+            "model/list",
+        ]
+        assert sent[2]["params"] == {"includeHidden": False, "limit": 100, "cursor": None}
+        assert sent[3]["params"]["cursor"] == "page-2"
+        connection.__exit__.assert_called_once()
+
+    @pytest.mark.parametrize(
+        ("reply", "reason"),
+        [
+            (TimeoutError(), "timed out"),
+            (OSError("disconnected"), "disconnected"),
+            ("invalid json", "failed"),
+            (json.dumps({"id": 1, "error": {"message": "unsupported"}}), "unsupported"),
+            (json.dumps({"id": 1, "result": {"data": None}}), "invalid model data"),
+            (json.dumps({"id": 1, "result": {"data": []}}), "no models"),
+            (json.dumps({"id": 1, "result": {"data": [], "nextCursor": 2}}), "invalid pagination"),
+        ],
+    )
+    def test_reports_discovery_errors_and_closes_connection(self, monkeypatch, reply, reason):
+        connection, _ = self._connection(monkeypatch, [json.dumps({"id": 0, "result": {}}), reply])
+        models, error = codex.list_harness_models("ws://127.0.0.1:41001")
+
+        assert models == []
+        assert reason in error
+        connection.__exit__.assert_called_once()
+
+    def test_rejects_repeated_cursor(self, monkeypatch):
+        self._connection(
+            monkeypatch,
+            [
+                json.dumps({"id": 0, "result": {}}),
+                json.dumps({"id": 1, "result": {"data": [], "nextCursor": "same"}}),
+                json.dumps({"id": 2, "result": {"data": [], "nextCursor": "same"}}),
+            ],
+        )
+        models, error = codex.list_harness_models("ws://127.0.0.1:41001")
+        assert models == []
+        assert "pagination" in error
 
 
 class TestCodexSpec:

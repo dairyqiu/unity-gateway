@@ -3,13 +3,17 @@
 from __future__ import annotations
 
 import copy
+import json
 import os
 import re
+import time
 from collections.abc import Callable
 from pathlib import Path
 
 import tomlkit
 from tomlkit.exceptions import ParseError
+from websockets.exceptions import WebSocketException
+from websockets.sync.client import connect
 
 from ucode.codex_config import (
     codex_config_args,
@@ -66,6 +70,7 @@ MINIMUM_ROUTING_CODEX_VERSION = (0, 145, 0)
 MINIMUM_ROUTING_CODEX_VERSION_TEXT = "0.145.0"
 # Retained only to identify and remove state written by the legacy persisted opt-in.
 SMART_ROUTING_STATE_KEY = smart_routing_v2.LEGACY_STATE_KEY
+MODEL_DISCOVERY_TIMEOUT_SECONDS = 20
 
 SPEC: ToolSpec = {
     "binary": "codex",
@@ -175,6 +180,72 @@ def _provider_block(
             "refresh_interval_ms": 900000,
         },
     }
+
+
+def list_harness_models(app_server_url: str) -> tuple[list[str], str | None]:
+    """Read the running app-server's model catalog without creating a thread or turn."""
+    try:
+        models = _list_harness_models(app_server_url)
+    except TimeoutError:
+        return [], "Codex model/list timed out"
+    except (OSError, RuntimeError, ValueError, WebSocketException) as exc:
+        return [], f"Codex model/list failed: {exc}"
+    return (models, None) if models else ([], "Codex model/list returned no models")
+
+
+def _list_harness_models(app_server_url: str) -> list[str]:
+    deadline = time.monotonic() + MODEL_DISCOVERY_TIMEOUT_SECONDS
+    with connect(
+        app_server_url,
+        open_timeout=MODEL_DISCOVERY_TIMEOUT_SECONDS,
+        close_timeout=1,
+        max_size=4 * 1024 * 1024,
+    ) as connection:
+
+        def request(request_id: int, method: str, params: dict) -> dict:
+            connection.send(json.dumps({"id": request_id, "method": method, "params": params}))
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError
+                message = json.loads(connection.recv(timeout=remaining))
+                if not isinstance(message, dict) or message.get("id") != request_id:
+                    continue
+                if "error" in message:
+                    raise RuntimeError(f"{method}: {message['error']}")
+                result = message.get("result")
+                if not isinstance(result, dict):
+                    raise RuntimeError(f"{method} returned an invalid result")
+                return result
+
+        request(0, "initialize", {"clientInfo": {"name": "ug", "version": ucode_version()}})
+        connection.send(json.dumps({"method": "initialized"}))
+        models: list[str] = []
+        seen_cursors: set[str] = set()
+        cursor = None
+        request_id = 1
+        while True:
+            result = request(
+                request_id,
+                "model/list",
+                {"includeHidden": False, "limit": 100, "cursor": cursor},
+            )
+            rows = result.get("data")
+            if not isinstance(rows, list):
+                raise RuntimeError("model/list returned invalid model data")
+            for row in rows:
+                if not isinstance(row, dict) or row.get("hidden"):
+                    continue
+                model = row.get("model")
+                if isinstance(model, str) and model.strip():
+                    models.append(model.strip())
+            cursor = result.get("nextCursor")
+            if cursor is None:
+                return list(dict.fromkeys(models))
+            if not isinstance(cursor, str) or not cursor or cursor in seen_cursors:
+                raise RuntimeError("model/list returned an invalid pagination cursor")
+            seen_cursors.add(cursor)
+            request_id += 1
 
 
 def render_overlay(
