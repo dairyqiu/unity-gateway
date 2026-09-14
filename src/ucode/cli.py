@@ -3,19 +3,25 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
+import json
 import os
 import shutil
 import subprocess
+import sys
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from importlib import metadata
+from pathlib import Path
 from typing import Annotated, Any
 
 import typer
 from rich.panel import Panel
 from typer.core import TyperCommand
 
-from ucode import custom_oauth
+from ucode import custom_oauth, doctor, managed_export, mcp_proxy, mcp_web_search, telemetry
 from ucode.agents import (
     TOOL_SPECS,
     LaunchOptions,
@@ -23,6 +29,7 @@ from ucode.agents import (
     configure_selected_tools,
     configure_single_tool,
     configure_tool,
+    cursor,
     ensure_bootstrap_dependencies,
     ensure_provider_state,
     explicit_model_arg_value,
@@ -44,7 +51,7 @@ from ucode.agents import (
 from ucode.agents.args import has_explicit_model_arg
 from ucode.agents.codex import revert_legacy_shared_config
 from ucode.agents.pi import PI_SETTINGS_BACKUP_PATH, PI_SETTINGS_PATH
-from ucode.config_io import is_dry_run, restore_file, set_dry_run
+from ucode.config_io import is_dry_run, read_json_safe, restore_file, set_dry_run
 from ucode.databricks import (
     apply_pat_environment,
     build_shared_base_urls,
@@ -112,6 +119,7 @@ from ucode.skills_download import (
     configure_skills_download_command,
     download_managed_skills_on_launch,
 )
+from ucode.smart_routing import claude_routing, codex_routing
 from ucode.smart_routing import v2 as smart_routing_v2
 from ucode.smart_routing.claude_hooks import FIRST_PROMPT_SOCKET_ENV, ROUTE_FIRST_PROMPT_EVENT
 from ucode.state import (
@@ -144,6 +152,11 @@ from ucode.ui import (
     status_badge,
 )
 from ucode.usage import usage as usage_report
+
+if os.name != "nt":
+    from ucode.smart_routing import claude_pty
+else:
+    claude_pty = None
 
 CustomOAuthConfig = custom_oauth.CustomOAuthConfig
 
@@ -1100,9 +1113,7 @@ app.add_typer(skill_app, name="skill", help="Databricks Skills for your coding t
 
 def _version_callback(value: bool) -> None:
     if value:
-        from ucode.telemetry import ucode_version
-
-        print(ucode_version())
+        print(telemetry.ucode_version())
         raise typer.Exit()
 
 
@@ -1237,9 +1248,7 @@ def mcp_remove(
 @mcp_app.command("web-search")
 def mcp_web_search_cmd() -> None:
     """Run the web_search MCP server over stdio. Invoked as a subprocess by Claude Code."""
-    from ucode.mcp_web_search import serve
-
-    serve()
+    mcp_web_search.serve()
 
 
 @skill_app.command("add")
@@ -1451,15 +1460,13 @@ def mcp_proxy_cmd(
     freshly-minted token on every upstream request, so it never expires
     mid-session. Not meant for interactive use — the agent manages this
     process's lifecycle."""
-    from ucode.mcp_proxy import serve
-
     state = load_state()
     workspace = host or state.get("workspace")
     if not workspace:
         print_err("No workspace configured. Run `ug configure` first.")
         raise typer.Exit(1)
     profile = profile or state.get("profile")
-    serve(url, workspace, profile, use_pat=use_pat or bool(state.get("use_pat")))
+    mcp_proxy.serve(url, workspace, profile, use_pat=use_pat or bool(state.get("use_pat")))
 
 
 @app.command("auth-token", hidden=True)
@@ -1507,8 +1514,6 @@ def auth_token_cmd(
     interactive use. All token logic (DATABRICKS_BEARER short-circuit, PAT
     profiles, OAuth refresh) lives in `get_databricks_token`, so the same
     binary works on macOS, Linux, and Windows without any POSIX shell."""
-    import sys
-
     if client_id is not None and use_pat:
         print_err("--client-id cannot be combined with --use-pat.")
         raise typer.Exit(1)
@@ -1563,11 +1568,6 @@ def auth_token_cmd(
 
 
 def _oauth_token_is_fresh(token: str, buffer_seconds: float = 120) -> bool:
-    import base64
-    import binascii
-    import json
-    import time
-
     try:
         payload = token.split(".")[1]
         payload += "=" * (-len(payload) % 4)
@@ -1587,17 +1587,8 @@ def codex_router_hook_cmd(
     models_file: Annotated[str | None, typer.Option("--models-file")] = None,
 ) -> None:
     """Run a Codex smart-routing lifecycle hook."""
-    import json
-    import sys
-
     if not smart_routing_v2.enabled():
         return
-
-    from ucode.smart_routing.codex_routing import (
-        record_session_start,
-        record_subagent_start,
-        route_pre_tool_use,
-    )
 
     try:
         payload = json.loads(sys.stdin.read() or "{}")
@@ -1606,10 +1597,10 @@ def codex_router_hook_cmd(
     if not isinstance(payload, dict):
         return
     if event == "session-start":
-        record_session_start(payload)
+        codex_routing.record_session_start(payload)
         return
     if event == "record-subagent":
-        record = record_subagent_start(payload)
+        record = codex_routing.record_subagent_start(payload)
         matched = record.get("matches_router_decision")
         if matched is True:
             sys.stdout.write(
@@ -1636,10 +1627,6 @@ def codex_router_hook_cmd(
     if event != "route-subagent" or not host:
         return
     if models_file is not None:
-        from pathlib import Path
-
-        from ucode.config_io import read_json_safe
-
         models = read_json_safe(Path(models_file)).get("models")
         if not isinstance(models, list) or not all(
             isinstance(entry, str) and entry.strip() for entry in models
@@ -1656,7 +1643,7 @@ def codex_router_hook_cmd(
                 token = get_databricks_token(host, profile, force_refresh=True)
             except RuntimeError:
                 return
-    output = route_pre_tool_use(
+    output = codex_routing.route_pre_tool_use(
         payload,
         workspace=host,
         token=token,
@@ -1677,16 +1664,8 @@ def claude_router_hook_cmd(
     socket_path: Annotated[str | None, typer.Option("--socket")] = None,
 ) -> None:
     """Run a Claude Code smart-routing lifecycle hook."""
-    import json
-    import sys
-
     if not smart_routing_v2.enabled():
         return
-
-    from ucode.smart_routing.claude_routing import (
-        record_session_start,
-        record_subagent_start,
-    )
 
     try:
         payload = json.loads(sys.stdin.read() or "{}")
@@ -1699,22 +1678,19 @@ def claude_router_hook_cmd(
             socket_path = os.environ.get(FIRST_PROMPT_SOCKET_ENV)
         if not socket_path:
             return
-        from pathlib import Path
-
-        from ucode.smart_routing.claude_pty import (
-            first_prompt_hook_output,
-            request_first_prompt_route,
+        if claude_pty is None:
+            raise RuntimeError("Claude smart routing requires a POSIX platform.")
+        output = claude_pty.first_prompt_hook_output(
+            claude_pty.request_first_prompt_route(Path(socket_path), payload)
         )
-
-        output = first_prompt_hook_output(request_first_prompt_route(Path(socket_path), payload))
         if output is not None:
             sys.stdout.write(json.dumps(output))
         return
     if event == "session-start":
-        record_session_start(payload)
+        claude_routing.record_session_start(payload)
         return
     if event == "record-subagent":
-        record = record_subagent_start(payload)
+        record = claude_routing.record_subagent_start(payload)
         matched = record.get("matches_router_decision")
         if matched is True:
             sys.stdout.write(
@@ -2749,8 +2725,6 @@ def cursor_cmd(ctx: typer.Context) -> None:
     this command is a thin convenience wrapper over `cursor-agent`, kept for
     symmetry with the other `ug <agent>` launchers.
     """
-    from ucode.agents import cursor
-
     try:
         if not shutil.which(cursor.CURSOR_BINARY):
             raise RuntimeError(
@@ -3272,10 +3246,8 @@ def export_cmd(
     excluded. Any user can run it; it makes no network calls and mutates no workspace or local
     state. Without --file the JSON is printed to stdout; diagnostics and errors go to stderr.
     """
-    from ucode.managed_export import export_command
-
     try:
-        export_command(file_path=file_path)
+        managed_export.export_command(file_path=file_path)
     except RuntimeError as exc:
         print_err(str(exc))
         raise typer.Exit(1) from None
@@ -3304,10 +3276,8 @@ def revert_cmd() -> None:
 @app.command("doctor")
 def doctor_cmd() -> None:
     """Diagnose the local ug setup and offer to fix any problems found."""
-    from ucode.doctor import doctor
-
     try:
-        doctor()
+        doctor.doctor()
     except RuntimeError as exc:
         print_err(str(exc))
         raise typer.Exit(1) from None

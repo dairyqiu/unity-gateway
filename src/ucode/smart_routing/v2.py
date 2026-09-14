@@ -16,6 +16,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import NoReturn, TextIO
 
+from ucode import agents
 from ucode.codex_config import (
     codex_config_args,
     custom_catalog_models,
@@ -30,6 +31,7 @@ from ucode.databricks import (
     list_anthropic_models,
     list_codex_models,
 )
+from ucode.smart_routing import LEGACY_STATE_KEY as LEGACY_STATE_KEY
 from ucode.smart_routing import claude_routing, codex_interposer, routing
 from ucode.smart_routing.claude_hooks import (
     FIRST_PROMPT_SOCKET_ENV,
@@ -40,8 +42,15 @@ from ucode.smart_routing.codex_hooks import merge_pre_tool_use_hooks
 from ucode.smart_routing.codex_routing import codex_model_id, routing_model_id
 from ucode.ui import print_note, print_warning
 
+if os.name != "nt":
+    import fcntl
+
+    from ucode.smart_routing import claude_pty
+else:
+    fcntl = None
+    claude_pty = None
+
 ENV_VAR = "ENABLE_SMART_ROUTING_V2"
-LEGACY_STATE_KEY = "smart_routing_enabled"
 
 CODEX_INTERPOSER_LOG = APP_DIR / "codex-v2-interposer.log"
 
@@ -72,15 +81,13 @@ def _model_picker_catalog() -> AnthropicModelCatalog | None:
     administrator exposed, so there is no need to query the gateway catalog first.
     """
     try:
-        from ucode.agents.claude import (
-            CLAUDE_SETTINGS_PATH,
-            CLAUDE_USER_SETTINGS_PATH,
-            _managed_settings_path,
-        )
-
         # Hierarchy: managed settings, CLI-supplied settings (ucode-settings.json), local user
         # settings, based on the modelPicker scope documented at https://code.claude.com/docs/en/settings-reference#modelpicker.
-        paths = [_managed_settings_path(), CLAUDE_SETTINGS_PATH, CLAUDE_USER_SETTINGS_PATH]
+        paths = [
+            agents.claude._managed_settings_path(),
+            agents.claude.CLAUDE_SETTINGS_PATH,
+            agents.claude.CLAUDE_USER_SETTINGS_PATH,
+        ]
     except (ImportError, OSError):
         return None
     for path in paths:
@@ -344,8 +351,8 @@ class _ClaudeModelSettingGuard:
         self._lock: TextIO | None = None
 
     def begin(self, routed_model: str) -> None:
-        import fcntl
-
+        if fcntl is None:
+            raise RuntimeError("Claude smart routing requires a POSIX platform.")
         APP_DIR.mkdir(parents=True, exist_ok=True)
         self._lock = open(APP_DIR / "claude-v2-model.lock", "a+", encoding="utf-8")
         fcntl.flock(self._lock, fcntl.LOCK_EX)
@@ -357,8 +364,6 @@ class _ClaudeModelSettingGuard:
         return isinstance(value, str) and value == self._routed_model
 
     def restore(self) -> None:
-        import fcntl
-
         if self._before is None:
             return
         try:
@@ -389,9 +394,8 @@ def launch_claude(
     model_name: Callable[[str], str],
 ) -> NoReturn:
     """Launch Claude in the first-prompt routing PTY wrapper."""
-    from ucode.agents.claude import GATEWAY_MODEL_DISCOVERY_ENV_VAR
-    from ucode.smart_routing import claude_pty
-
+    if claude_pty is None:
+        raise RuntimeError("Claude smart routing requires a POSIX platform.")
     workspace = state.get("workspace")
     if not workspace:
         raise RuntimeError(
@@ -402,7 +406,7 @@ def launch_claude(
     # if modelPicker is defined, then skip model discovery.
     picker_catalog = _model_picker_catalog()
     if picker_catalog is None:
-        os.environ[GATEWAY_MODEL_DISCOVERY_ENV_VAR] = "1"
+        os.environ[agents.claude.GATEWAY_MODEL_DISCOVERY_ENV_VAR] = "1"
         os.environ["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1"
         catalog = list_anthropic_model_catalog(workspace, token)
     else:
@@ -501,8 +505,6 @@ def launch_codex(
     start_model: str | None,
     render_overlay: Callable[..., dict],
 ) -> NoReturn:
-    from ucode.agents.codex import list_harness_models
-
     workspace = state.get("workspace")
     if not workspace:
         raise RuntimeError(
@@ -554,7 +556,7 @@ def launch_codex(
                     "Codex app-server did not become ready for smart routing; check workspace auth."
                 )
             if not catalog_models:
-                harness_models, harness_error = list_harness_models(app_server_url)
+                harness_models, harness_error = agents.codex.list_harness_models(app_server_url)
                 available_models = list(
                     {
                         routing_model_id(model): model

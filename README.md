@@ -54,7 +54,8 @@ the launch-scoped hooks through `/hooks`.
 
 Codex smart routing combines `/ai-gateway/codex/v1/models` with the running Codex app-server's
 `model/list` catalog, deduplicating GPT aliases before sending candidates to `routes:select`.
-A configured `model_catalog_json` overrides both sources. Main-agent and subagent routing share
+A configured `model_catalog_json` overrides both sources; an unreadable or empty catalog stops
+the launch instead of falling back to discovery. Main-agent and subagent routing share
 the same model list; the session-local file used by subagent hooks is removed on exit.
 
 ```bash

@@ -482,14 +482,34 @@ class TestCustomCatalogModels:
 
         assert codex_config.custom_catalog_models() == expected
 
-    def test_unreadable_catalog_warns_and_falls_back(self, tmp_path, monkeypatch):
-        self._settings(tmp_path, monkeypatch, cli=tmp_path / "missing.json")
-        warnings = []
-        monkeypatch.setattr(codex_config, "print_warning", warnings.append)
+    @pytest.mark.parametrize("contents", [None, "invalid json", "{}", '{"models": []}'])
+    def test_invalid_custom_catalog_never_falls_back(self, tmp_path, monkeypatch, contents):
+        catalog = tmp_path / "custom.json"
+        if contents is not None:
+            catalog.write_text(contents, encoding="utf-8")
+        self._settings(
+            tmp_path,
+            monkeypatch,
+            cli=catalog,
+            default=self._catalog(tmp_path / "default.json", ["gpt-lower-precedence"]),
+        )
+        monkeypatch.setattr(v2, "get_databricks_token", lambda *_args: "token")
+        monkeypatch.setattr(v2, "list_codex_models", lambda *_args: pytest.fail("queried gateway"))
+        monkeypatch.setattr(
+            codex, "list_harness_models", lambda *_args: pytest.fail("queried harness")
+        )
+        monkeypatch.setattr(
+            v2.subprocess, "Popen", lambda *_args, **_kwargs: pytest.fail("started app-server")
+        )
 
-        assert codex_config.custom_catalog_models() is None
-        assert len(warnings) == 1
-        assert "falling back to the AI Gateway Codex model catalog" in warnings[0]
+        with pytest.raises(RuntimeError, match="Fix the catalog or remove model_catalog_json"):
+            v2.launch_codex(
+                {"workspace": WS},
+                [],
+                binary="codex",
+                start_model=None,
+                render_overlay=codex.render_overlay,
+            )
 
     def test_launch_prefers_catalog_over_cached_models(self, tmp_path, monkeypatch):
         self._settings(

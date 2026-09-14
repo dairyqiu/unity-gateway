@@ -45,6 +45,7 @@ from ucode.managed_files import (
     reconcile_managed_file,
     revert_managed_file,
 )
+from ucode.smart_routing import LEGACY_STATE_KEY
 from ucode.smart_routing import v2 as smart_routing_v2
 from ucode.smart_routing.claude_hooks import (
     remove_smart_routing_hooks,
@@ -79,7 +80,7 @@ SPEC: ToolSpec = {
 }
 
 # Retained only to identify and remove state written by the legacy persisted opt-in.
-SMART_ROUTING_STATE_KEY = smart_routing_v2.LEGACY_STATE_KEY
+SMART_ROUTING_STATE_KEY = LEGACY_STATE_KEY
 
 
 def _parse_version(value: str) -> tuple[int, int, int] | None:

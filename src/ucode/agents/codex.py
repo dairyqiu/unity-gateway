@@ -46,11 +46,13 @@ from ucode.managed_files import (
     reconcile_managed_file,
     revert_managed_file,
 )
+from ucode.smart_routing import LEGACY_STATE_KEY
 from ucode.smart_routing import v2 as smart_routing_v2
 from ucode.smart_routing.codex_hooks import (
     remove_smart_routing_hooks,
     sync_smart_routing_hooks,
 )
+from ucode.smart_routing.codex_routing import clear_routing_artifacts
 from ucode.state import mark_tool_managed, save_state
 from ucode.telemetry import agent_version, ucode_version
 from ucode.ui import print_warning_err
@@ -69,7 +71,7 @@ MINIMUM_CODEX_VERSION_TEXT = "0.134.0"
 MINIMUM_ROUTING_CODEX_VERSION = (0, 145, 0)
 MINIMUM_ROUTING_CODEX_VERSION_TEXT = "0.145.0"
 # Retained only to identify and remove state written by the legacy persisted opt-in.
-SMART_ROUTING_STATE_KEY = smart_routing_v2.LEGACY_STATE_KEY
+SMART_ROUTING_STATE_KEY = LEGACY_STATE_KEY
 MODEL_DISCOVERY_TIMEOUT_SECONDS = 20
 
 SPEC: ToolSpec = {
@@ -666,8 +668,6 @@ def disable_smart_routing(state: dict) -> bool:
         if remove_smart_routing_hooks(doc):
             write_toml_file(path, doc)
             changed = True
-    from ucode.smart_routing.codex_routing import clear_routing_artifacts
-
     clear_routing_artifacts()
     return changed
 
