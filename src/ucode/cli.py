@@ -2738,13 +2738,21 @@ def claude_cowork_cmd(
             "skips model discovery; e.g. --model claude-opus-4-8 --model claude-sonnet-4-5.",
         ),
     ] = None,
+    open_app: Annotated[
+        bool,
+        typer.Option(
+            "--open/--no-open",
+            help="(Re)launch Claude Desktop so it picks up the config (macOS). Use --no-open to "
+            "open it yourself.",
+        ),
+    ] = True,
 ) -> None:
     """Launch Claude Desktop / Cowork through Databricks AI Gateway (experimental).
 
     Establishes the Databricks + Anthropic auth sessions, starts a loopback refresh
-    proxy that keeps both credentials fresh, and writes a Desktop gateway config
-    pointing at it. Stays running to keep the proxy alive — leave it open while you
-    use Desktop.
+    proxy that keeps both credentials fresh, writes a Desktop gateway config pointing
+    at it, and (re)launches Desktop. Stays running to keep the proxy alive — leave it
+    open while you use Desktop.
     """
     resolved_workspace = workspace or load_state().get("workspace")
     if not resolved_workspace:
@@ -2757,6 +2765,7 @@ def claude_cowork_cmd(
             resolved_profile,
             provider=provider,
             models=models,
+            open_app=open_app,
         )
     except RuntimeError as exc:
         print_err(str(exc))

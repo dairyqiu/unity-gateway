@@ -33,6 +33,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 import uuid
 from pathlib import Path
 
@@ -66,6 +67,8 @@ _META_FILENAME = "_meta.json"
 _ENTRY_NAME = "Unity Gateway"
 # Desktop writes its own configLibrary files mode 0600; match that.
 _CONFIG_FILE_MODE = 0o600
+# Claude Desktop's macOS bundle id (stable across renames/locations, unlike the app name).
+_APP_BUNDLE_ID = "com.anthropic.claudefordesktop"
 
 
 def _app_support_dir() -> Path:
@@ -158,6 +161,70 @@ def render_config(base_url: str, models: list[str]) -> dict:
     return config
 
 
+def _is_wsl() -> bool:
+    """True when running under WSL (where 'Linux' is a shell on Windows and the
+    Desktop app is the Windows one)."""
+    if os.environ.get("WSL_DISTRO_NAME"):
+        return True
+    try:
+        return "microsoft" in Path("/proc/version").read_text().lower()
+    except OSError:
+        return False
+
+
+def _macos_app_is_running() -> bool:
+    result = subprocess.run(
+        ["osascript", "-e", f'application id "{_APP_BUNDLE_ID}" is running'],
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=15,
+    )
+    return result.stdout.strip() == "true"
+
+
+def relaunch_desktop_app() -> None:
+    """(Re)launch Claude Desktop so it re-reads the freshly-written config.
+
+    Desktop only reads ``configLibrary/`` at startup, so a running instance is
+    gracefully quit (a normal Quit event — the app still gets to save/prompt) and
+    reopened. macOS is implemented and verified; Windows and WSL need a real box to
+    validate their launch path, and native Linux has no Desktop app at all, so those
+    print manual guidance instead of guessing.
+    """
+    system = current_os()
+    if system is OS.MACOS:
+        if _macos_app_is_running():
+            print_note("Restarting Claude Desktop to pick up the config...")
+            subprocess.run(
+                ["osascript", "-e", f'quit app id "{_APP_BUNDLE_ID}"'], check=False, timeout=30
+            )
+            # Wait (bounded) for it to actually exit before relaunching.
+            for _ in range(40):
+                if not _macos_app_is_running():
+                    break
+                time.sleep(0.25)
+        else:
+            print_note("Launching Claude Desktop...")
+        subprocess.run(["open", "-b", _APP_BUNDLE_ID], check=False, timeout=30)
+        return
+    if _is_wsl():
+        print_warning(
+            "Auto-launch under WSL isn't wired up yet (the Desktop app is the Windows one). "
+            "Open or restart Claude Desktop on Windows to pick up the config."
+        )
+        return
+    if system is OS.WINDOWS:
+        print_warning(
+            "Auto-launch on Windows isn't wired up yet — open or restart Claude Desktop manually."
+        )
+        return
+    print_warning(
+        "Claude Desktop isn't available on Linux; run `ug claude-cowork --proxy-only` and tunnel "
+        "to a Mac/Windows machine running Desktop."
+    )
+
+
 def _resolve_anthropic_oauth() -> str:
     """Return the Anthropic subscription OAuth token, launching the auth session
     when needed.
@@ -237,11 +304,13 @@ def launch(
     profile: str | None,
     provider: str,
     models: list[str] | None = None,
+    open_app: bool = True,
 ) -> None:
     """Configure Claude Desktop for ``provider`` and run the refresh proxy.
 
     Blocks until interrupted: the proxy must outlive the call, since Desktop is a
-    separate long-lived GUI process (not a child we exec).
+    separate long-lived GUI process (not a child we exec). When ``open_app`` is set
+    (the default), (re)launch Desktop so it picks up the config with no manual step.
     """
     anthropic_oauth = _resolve_anthropic_oauth()
     _ensure_databricks_session(workspace, profile)
@@ -273,11 +342,15 @@ def launch(
     prior_applied = register_active_config(config_entry_id(workspace))
 
     print_success(f"Gateway refresh proxy running at {base_url}")
-    print_note(
-        f"Registered + applied the '{_ENTRY_NAME}' gateway config. Fully quit Claude Desktop "
-        "(Cmd-Q) and reopen it to pick it up — it reads the config only at startup. Keep this "
-        f"command running while you use Desktop; closing it stops the proxy.\nConfig: {path}"
-    )
+    print_note(f"Registered + applied the '{_ENTRY_NAME}' gateway config.\nConfig: {path}")
+    if open_app:
+        relaunch_desktop_app()
+    else:
+        print_note(
+            "Fully quit Claude Desktop (Cmd-Q) and reopen it to pick up the config — it reads "
+            "the config only at startup. (Pass --open to have ug (re)launch it for you.)"
+        )
+    print_note("Keep this command running while you use Desktop; closing it stops the proxy.")
     try:
         # Serve on the main thread until Ctrl-C. serve_forever() blocks in select()
         # and unwinds only via shutdown() or the KeyboardInterrupt SIGINT raises — it

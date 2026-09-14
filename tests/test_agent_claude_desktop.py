@@ -167,6 +167,29 @@ class TestResolveAnthropicOauth:
             claude_desktop._resolve_anthropic_oauth()
 
 
+class TestRelaunchDesktop:
+    def test_macos_launches_by_bundle_id(self, monkeypatch):
+        monkeypatch.setattr(claude_desktop, "current_os", lambda: OS.MACOS)
+        calls: list = []
+
+        def _fake_run(cmd, *_a, **_k):
+            calls.append(cmd)
+            # The "is running" probe returns false so we skip the quit path.
+            return subprocess.CompletedProcess(cmd, 0, stdout="false", stderr="")
+
+        monkeypatch.setattr(subprocess, "run", _fake_run)
+        claude_desktop.relaunch_desktop_app()
+        assert ["open", "-b", claude_desktop._APP_BUNDLE_ID] in calls
+
+    def test_native_linux_warns_and_launches_nothing(self, monkeypatch):
+        monkeypatch.setattr(claude_desktop, "current_os", lambda: OS.LINUX)
+        monkeypatch.setattr(claude_desktop, "_is_wsl", lambda: False)
+        calls: list = []
+        monkeypatch.setattr(subprocess, "run", lambda *a, **k: calls.append(a))
+        claude_desktop.relaunch_desktop_app()  # must not raise
+        assert calls == []  # no Desktop on Linux → nothing launched
+
+
 class TestEnsureDatabricksSession:
     def test_missing_databricks_cli_raises_actionable_error(self, monkeypatch):
         # A missing `databricks` binary must surface a clear install hint, not a
