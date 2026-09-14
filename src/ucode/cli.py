@@ -2715,8 +2715,8 @@ def claude_cmd(
             )
 
 
-@app.command("claude-cowork")
-def claude_cowork_cmd(
+@app.command("claude-desktop")
+def claude_desktop_cmd(
     provider: Annotated[
         str,
         typer.Option(

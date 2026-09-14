@@ -4,7 +4,7 @@ Claude Code is a CLI ucode spawns, so its refresh proxy lives exactly as long as
 the child process. Claude Desktop (and its Cowork mode) is a standalone GUI ucode
 cannot parent, and its gateway config is a static file. Writing tokens into that
 file would leave them to go stale — the Databricks OAuth token expires in ~1h. So
-`ug claude-cowork` keeps the same refresh-proxy model that `ug claude` uses:
+`ug claude-desktop` keeps the same refresh-proxy model that `ug claude` uses:
 
   1. Establish both auth sessions — the Databricks OAuth session (so the proxy can
      mint swap credentials) and the Anthropic subscription OAuth (via
@@ -83,7 +83,7 @@ def _app_support_dir() -> Path:
             raise RuntimeError("APPDATA is not set; cannot locate Claude Desktop config.")
         return Path(base) / "Claude-3p"
     raise RuntimeError(
-        f"`ug claude-cowork` currently supports macOS and Windows only (detected {system.value})."
+        f"`ug claude-desktop` currently supports macOS and Windows only (detected {system.value})."
     )
 
 
@@ -93,7 +93,11 @@ def _config_library_dir() -> Path:
 
 def config_entry_id(workspace: str) -> str:
     """Deterministic entry id for ``workspace`` so re-runs reuse one stable entry
-    rather than accumulating duplicates."""
+    rather than accumulating duplicates.
+
+    The seed string is an internal, stable key — deliberately NOT tied to the
+    command name, so renaming the command never changes existing entry ids.
+    """
     return str(uuid.uuid5(uuid.NAMESPACE_URL, f"ug-claude-cowork::{workspace}"))
 
 
@@ -220,8 +224,8 @@ def relaunch_desktop_app() -> None:
         )
         return
     print_warning(
-        "Claude Desktop isn't available on Linux; run `ug claude-cowork --proxy-only` and tunnel "
-        "to a Mac/Windows machine running Desktop."
+        "Claude Desktop isn't available on Linux; run `ug claude-desktop` on the Mac or Windows "
+        "machine where Desktop is installed."
     )
 
 
@@ -318,7 +322,7 @@ def launch(
     extra_headers = {
         gateway_proxy.AUTHORIZATION_HEADER: f"Bearer {anthropic_oauth}",
         MODEL_PROVIDER_SERVICE_HEADER: provider,
-        "User-Agent": f"ucode/{ucode_version()} claude-cowork/{agent_version('claude')}",
+        "User-Agent": f"ucode/{ucode_version()} claude-desktop/{agent_version('claude')}",
     }
     server, cache, client = gateway_proxy.start_proxy(
         workspace,
