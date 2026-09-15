@@ -1,10 +1,10 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 import pytest
 
+from ucode import codex_config
 from ucode.agents import LaunchOptions, codex
 from ucode.smart_routing import codex_interposer, codex_routing, v2
 
@@ -24,105 +24,18 @@ def test_smart_routing_switch_message_is_boxed():
     )
 
 
-class TestCodexModelCatalog:
-    @staticmethod
-    def _configure_paths(tmp_path, monkeypatch):
-        managed = tmp_path / "managed_config.toml"
-        profile = tmp_path / "ucode.config.toml"
-        codex_home = tmp_path / "codex-home"
-        codex_home.mkdir()
-        monkeypatch.setattr(codex, "_managed_config_path", lambda: managed)
-        monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", profile)
-        monkeypatch.setenv("CODEX_HOME", str(codex_home))
-        return managed, profile, codex_home / "config.toml"
+def test_smart_routing_switch_message_wraps_to_fixed_width():
+    message = v2.format_routing_notice(
+        "model-x",
+        "This rationale is deliberately long enough to wrap onto another line "
+        "without making the routing box wider.",
+    )
 
-    @staticmethod
-    def _write_catalog(path, models):
-        path.write_text(json.dumps({"models": models}), encoding="utf-8")
-
-    def test_managed_catalog_models_take_priority_and_are_deduplicated(self, tmp_path, monkeypatch):
-        managed, profile, _user = self._configure_paths(tmp_path, monkeypatch)
-        managed_catalog = tmp_path / "managed-models.json"
-        profile_catalog = tmp_path / "profile-models.json"
-        self._write_catalog(
-            managed_catalog,
-            [
-                {"slug": " system.ai.gpt-5-5 "},
-                {"slug": "system.ai.glm-5-3"},
-                {"slug": "system.ai.gpt-5-5"},
-                {"display_name": "missing slug"},
-            ],
-        )
-        self._write_catalog(profile_catalog, [{"slug": "profile-model"}])
-        managed.write_text(f'model_catalog_json = "{managed_catalog}"\n', encoding="utf-8")
-        profile.write_text(f'model_catalog_json = "{profile_catalog}"\n', encoding="utf-8")
-
-        models, catalog_path = v2.configured_codex_models({"codex_models": ["cached-model"]})
-
-        assert models == ["system.ai.gpt-5-5", "system.ai.glm-5-3"]
-        assert catalog_path == managed_catalog
-
-    def test_falls_back_to_profile_catalog(self, tmp_path, monkeypatch):
-        managed, profile, _user = self._configure_paths(tmp_path, monkeypatch)
-        catalog = tmp_path / "profile-models.json"
-        self._write_catalog(catalog, [{"slug": "system.ai.gpt-5-6-sol"}])
-        managed.write_text('model_provider = "managed"\n', encoding="utf-8")
-        profile.write_text(f'model_catalog_json = "{catalog}"\n', encoding="utf-8")
-
-        models, catalog_path = v2.configured_codex_models({})
-
-        assert models == ["system.ai.gpt-5-6-sol"]
-        assert catalog_path == catalog
-
-    def test_falls_back_to_user_catalog(self, tmp_path, monkeypatch):
-        managed, profile, user = self._configure_paths(tmp_path, monkeypatch)
-        catalog = tmp_path / "user-models.json"
-        self._write_catalog(catalog, [{"slug": "system.ai.glm-5-3"}])
-        managed.write_text('model_provider = "managed"\n', encoding="utf-8")
-        profile.write_text('model_provider = "profile"\n', encoding="utf-8")
-        user.write_text(f'model_catalog_json = "{catalog}"\n', encoding="utf-8")
-
-        models, catalog_path = v2.configured_codex_models({})
-
-        assert models == ["system.ai.glm-5-3"]
-        assert catalog_path == catalog
-
-    def test_falls_back_to_cached_workspace_models(self, tmp_path, monkeypatch):
-        self._configure_paths(tmp_path, monkeypatch)
-        state = {
-            "codex_models": ["system.ai.gpt-5-6-sol"],
-            "oss_models": ["system.ai.glm-5-2"],
-        }
-
-        assert v2.configured_codex_models(state) == (
-            ["gpt-5.6-sol", "system.ai.glm-5-2"],
-            None,
-        )
-
-    def test_configured_empty_catalog_does_not_fall_back_to_cached_models(
-        self, tmp_path, monkeypatch
-    ):
-        managed, _profile, _user = self._configure_paths(tmp_path, monkeypatch)
-        catalog = tmp_path / "empty-models.json"
-        self._write_catalog(catalog, [])
-        managed.write_text(f'model_catalog_json = "{catalog}"\n', encoding="utf-8")
-
-        models, catalog_path = v2.configured_codex_models({"codex_models": ["cached-model"]})
-
-        assert models == []
-        assert catalog_path == catalog
-
-    def test_configured_unreadable_catalog_does_not_fall_back_to_cached_models(
-        self, tmp_path, monkeypatch
-    ):
-        managed, _profile, _user = self._configure_paths(tmp_path, monkeypatch)
-        catalog = tmp_path / "missing-models.json"
-        managed.write_text(f'model_catalog_json = "{catalog}"\n', encoding="utf-8")
-
-        models, catalog_path = v2.configured_codex_models({"codex_models": ["cached-model"]})
-
-        assert models == []
-        assert catalog_path == catalog
+    lines = message.splitlines()
+    assert len({len(line) for line in lines}) == 1
+    assert lines[0] == "┌" + ("─" * 75) + "┐"
+    assert "│ Reason : This rationale is deliberately long enough to wrap onto another  │" in lines
+    assert "│ line without making the routing box wider.                                │" in lines
 
 
 class TestLaunchCodex:
@@ -144,12 +57,9 @@ class TestLaunchCodex:
     )
     def test_codex_smart_routing_launch_dispatches_to_v2(self, monkeypatch, tool_args, options):
         calls = []
-        models = ["system.ai.gpt-5-5"]
-        catalog_path = Path("/catalog.json")
         monkeypatch.setenv(v2.ENV_VAR, "1")
-        monkeypatch.setattr(codex, "default_model", lambda state: None)
+        monkeypatch.setattr(codex, "_smart_routing_config_model", lambda state: "gpt-start")
         monkeypatch.setattr(codex, "clear_model_preferences", lambda state: False)
-        monkeypatch.setattr(v2, "configured_codex_models", lambda state: (models, catalog_path))
 
         def launch_v2(state, tool_args, **kwargs):
             calls.append((state, tool_args, kwargs))
@@ -168,9 +78,7 @@ class TestLaunchCodex:
                 tool_args,
                 {
                     "binary": "codex",
-                    "start_model": "system.ai.gpt-5-5",
-                    "available_models": models,
-                    "catalog_path": catalog_path,
+                    "start_model": "gpt-start",
                     "render_overlay": codex.render_overlay,
                 },
             )
@@ -212,12 +120,7 @@ class TestLaunchCodex:
         calls = []
         monkeypatch.setenv(v2.ENV_VAR, "1")
         monkeypatch.setattr(codex, "clear_model_preferences", lambda state: False)
-        monkeypatch.setattr(codex, "default_model", lambda state: None)
-        monkeypatch.setattr(
-            v2,
-            "configured_codex_models",
-            lambda state: (["gpt-5.6-luna"], None),
-        )
+        monkeypatch.setattr(codex, "_smart_routing_config_model", lambda state: None)
 
         def launch_v2(state, tool_args, **kwargs):
             calls.append(kwargs)
@@ -233,6 +136,51 @@ class TestLaunchCodex:
             )
 
         assert calls[0]["start_model"] == "gpt-5.6-luna"
+
+    @pytest.mark.parametrize("custom_home", [False, True])
+    @pytest.mark.parametrize(
+        "managed,profile,user,expected",
+        [
+            ('model = "managed"', 'model = "profile"', 'model = "user"', "managed"),
+            ("", 'model = "profile"', 'model = "user"', "profile"),
+            ("", "", 'model = "user"', "user"),
+            ('model = " "', "model = 12", 'model = "user"', "user"),
+            ("", "invalid toml", 'model = "user"', "user"),
+            (None, None, None, "gpt-5.6-luna"),
+        ],
+    )
+    def test_startup_config_precedence(
+        self, tmp_path, monkeypatch, custom_home, managed, profile, user, expected
+    ):
+        config_home = tmp_path / "codex"
+        config_home.mkdir()
+        managed_path = tmp_path / "managed_config.toml"
+        profile_path = config_home / "ucode.config.toml"
+        user_path = config_home / "config.toml"
+        monkeypatch.setenv(v2.ENV_VAR, "1")
+        monkeypatch.delenv("CODEX_HOME", raising=False)
+        monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", profile_path)
+        monkeypatch.setattr(codex, "codex_managed_config_path", lambda: managed_path)
+        monkeypatch.setattr(codex, "agent_version", lambda _: "0.145.0")
+        if custom_home:
+            monkeypatch.setenv("CODEX_HOME", str(config_home))
+            monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", tmp_path / "unused.config.toml")
+        for path, content in ((managed_path, managed), (profile_path, profile), (user_path, user)):
+            if content is not None:
+                path.write_text(content)
+        calls = []
+        monkeypatch.setattr(v2, "launch_codex", lambda *args, **kwargs: calls.append(kwargs))
+
+        # Model resolution and cleanup also run before the actual smart-routing launch.
+        codex.default_model({})
+        assert codex.clear_model_preferences({}) is False
+        codex.launch({"workspace": WS}, [], options=LaunchOptions(launch_smart_routing=True))
+
+        assert calls[0]["start_model"] == expected
+        for path, content in ((managed_path, managed), (profile_path, profile), (user_path, user)):
+            if content is not None:
+                assert path.read_text() == content
+        assert codex._smart_routing_config_model({"codex_default_model": "admin"}) == "admin"
 
     def test_owns_app_server_interposer_and_tui_lifecycle(self, monkeypatch):
         processes = []
@@ -290,8 +238,6 @@ class TestLaunchCodex:
                 ["--search"],
                 binary="codex",
                 start_model="gpt-start",
-                available_models=["system.ai.gpt-5-6-sol", "system.ai.glm-5-2"],
-                catalog_path=Path("/catalog.json"),
                 render_overlay=codex.render_overlay,
             )
 
@@ -300,18 +246,14 @@ class TestLaunchCodex:
             "codex",
             "app-server",
             "--config",
-            'model_provider="ucode-databricks"',
+            'model_provider="Databricks"',
             "--config",
             'model="gpt-start"',
             "--config",
         ]
-        assert processes[0].argv[7].startswith("model_providers.ucode-databricks={")
-        assert processes[0].argv[8:10] == [
-            "--config",
-            'model_catalog_json="/catalog.json"',
-        ]
-        assert processes[0].argv[10] == "--config"
-        hook_override = processes[0].argv[11]
+        assert processes[0].argv[7].startswith("model_providers.Databricks={")
+        assert processes[0].argv[8] == "--config"
+        hook_override = processes[0].argv[9]
         assert hook_override.startswith("hooks.PreToolUse=[{")
         assert 'matcher = "Agent|.*spawn_agent$"' in hook_override
         assert "codex-router-hook route-subagent" in hook_override
@@ -319,7 +261,7 @@ class TestLaunchCodex:
         assert "--profile myprof" in hook_override
         assert "--model system.ai.gpt-5-6-sol" in hook_override
         assert "--model system.ai.glm-5-2" in hook_override
-        assert processes[0].argv[12:] == [
+        assert processes[0].argv[10:] == [
             "--listen",
             "ws://127.0.0.1:41001",
         ]
@@ -426,12 +368,151 @@ class TestLaunchCodex:
                 [],
                 binary="codex",
                 start_model="gpt-5.6-luna",
-                available_models=[],
-                catalog_path=None,
                 render_overlay=codex.render_overlay,
             )
 
         assert exc.value.code == 0
+
+
+class TestCustomCatalogModels:
+    def _catalog(self, path, slugs):
+        path.write_text(
+            json.dumps({"models": [{"slug": slug} for slug in slugs]}),
+            encoding="utf-8",
+        )
+        return path
+
+    def _settings(self, tmp_path, monkeypatch, *, managed=None, cli=None, default=None):
+        home = tmp_path / "codex-home"
+        home.mkdir()
+        monkeypatch.setenv("CODEX_HOME", str(home))
+        managed_path = tmp_path / "managed_config.toml"
+        cli_path = home / "ucode.config.toml"
+        default_path = home / "config.toml"
+        for path, catalog in (
+            (managed_path, managed),
+            (cli_path, cli),
+            (default_path, default),
+        ):
+            if catalog:
+                text = "model_catalog_json = " + json.dumps(str(catalog)) + "\n"
+            else:
+                text = 'model = "gpt-5"\n'
+            path.write_text(text, encoding="utf-8")
+        monkeypatch.setattr(codex_config, "codex_managed_config_path", lambda: managed_path)
+        monkeypatch.setattr(codex_config, "DEFAULT_CODEX_CONFIG_PATH", cli_path)
+
+    @pytest.mark.parametrize(
+        ("managed_catalog", "cli_catalog", "default_catalog", "expected"),
+        [
+            ("gpt-managed", "gpt-cli", "gpt-default", ["gpt-managed"]),
+            (None, "gpt-cli", "gpt-default", ["gpt-cli"]),
+            (None, None, "gpt-default", ["gpt-default"]),
+            (None, None, None, None),
+        ],
+    )
+    def test_config_precedence(
+        self,
+        tmp_path,
+        monkeypatch,
+        managed_catalog,
+        cli_catalog,
+        default_catalog,
+        expected,
+    ):
+        managed, cli, default = (
+            self._catalog(tmp_path / f"{name}.json", [slug]) if slug else None
+            for name, slug in (
+                ("managed", managed_catalog),
+                ("cli", cli_catalog),
+                ("default", default_catalog),
+            )
+        )
+        self._settings(tmp_path, monkeypatch, managed=managed, cli=cli, default=default)
+
+        assert codex_config.custom_catalog_models() == expected
+
+    def test_unreadable_catalog_warns_and_falls_back(self, tmp_path, monkeypatch):
+        self._settings(tmp_path, monkeypatch, cli=tmp_path / "missing.json")
+        warnings = []
+        monkeypatch.setattr(codex_config, "print_warning", warnings.append)
+
+        assert codex_config.custom_catalog_models() is None
+        assert len(warnings) == 1
+        assert "falling back to the cached model services" in warnings[0]
+
+    def test_launch_prefers_catalog_over_cached_models(self, tmp_path, monkeypatch, capsys):
+        self._settings(
+            tmp_path,
+            monkeypatch,
+            cli=self._catalog(tmp_path / "cli.json", ["gpt-6-astra", "gpt-6-b"]),
+        )
+        monkeypatch.setattr(v2, "get_databricks_token", lambda *_args: "token")
+        monkeypatch.setattr(v2, "_free_port", lambda: 41001)
+        monkeypatch.setattr(v2, "_wait_for_app_server", lambda port, timeout: True)
+        monkeypatch.setattr(codex, "agent_version", lambda _binary: "0.145.0")
+        monkeypatch.setattr(codex, "ucode_version", lambda: "test")
+        launched = []
+
+        class FakeProcess:
+            def __init__(self, argv, **kwargs):
+                launched.append(argv)
+
+            def wait(self, timeout=None):
+                return 0
+
+            def terminate(self):
+                pass
+
+            def kill(self):
+                pass
+
+        monkeypatch.setattr(v2.subprocess, "Popen", FakeProcess)
+        interposer_kwargs = {}
+
+        def start_interposer(*args, **kwargs):
+            interposer_kwargs.update(kwargs)
+            return 41002, lambda: None
+
+        monkeypatch.setattr(codex_interposer, "start_interposer_thread", start_interposer)
+
+        with pytest.raises(SystemExit):
+            v2.launch_codex(
+                {"workspace": WS, "codex_models": ["system.ai.gpt-5-6-sol"]},
+                [],
+                binary="codex",
+                start_model="gpt-6-astra",
+                render_overlay=codex.render_overlay,
+            )
+
+        assert interposer_kwargs["available_models"] == ["gpt-6-astra", "gpt-6-b"]
+        hook_override = next(arg for arg in launched[0] if arg.startswith("hooks.PreToolUse="))
+        assert "--model gpt-6-astra" in hook_override
+        assert "--model gpt-6-b" in hook_override
+        assert "gpt-5-6-sol" not in hook_override
+        assert "Smart routing:" not in capsys.readouterr().out
+
+    def test_start_model_comes_from_custom_catalog(self, monkeypatch):
+        calls = []
+        monkeypatch.setenv(v2.ENV_VAR, "1")
+        monkeypatch.setattr(codex, "clear_model_preferences", lambda state: False)
+        monkeypatch.setattr(codex, "_smart_routing_config_model", lambda state: None)
+        monkeypatch.setattr(codex, "custom_catalog_models", lambda: ["gpt-6-astra", "gpt-6-b"])
+
+        def launch_v2(state, tool_args, **kwargs):
+            calls.append(kwargs)
+            raise SystemExit(0)
+
+        monkeypatch.setattr(v2, "launch_codex", launch_v2)
+
+        with pytest.raises(SystemExit):
+            codex.launch(
+                {"workspace": WS, "codex_models": ["system.ai.gpt-5-6-luna"]},
+                [],
+                options=LaunchOptions(launch_smart_routing=True),
+            )
+
+        assert calls[0]["start_model"] == "gpt-6-astra"
 
 
 def test_interposer_startup_failure_is_propagated(monkeypatch):
@@ -566,11 +647,11 @@ class TestInterposerSession:
         assert result.needs_settings_update
         assert "Task classified as bugfix." in sess.switch_message
 
-    def test_uses_selected_codex_model_and_shows_routing_notice(self):
+    def test_maps_selected_uc_gpt_model_and_shows_routing_notice(self):
         def select(_prompt):
             return (
                 codex_interposer.routing.RoutingDecision(
-                    model="gpt-5.6-luna",
+                    model="system.ai.gpt-5-6-luna",
                     raw_model="gpt-5-6-luna",
                     rationale="Trivial task.",
                 ),
@@ -595,23 +676,6 @@ class TestInterposerSession:
             codex_interposer.ITEM_COMPLETED,
         ]
         assert "Selected Model : gpt-5.6-luna" in (injected[1]["params"]["item"]["text"])
-
-    def test_preserves_selected_custom_catalog_slug(self):
-        sess = codex_interposer._Session(
-            None,
-            log=lambda _m: None,
-            route_decision=lambda _prompt: (
-                codex_interposer.routing.RoutingDecision(
-                    model="system.ai.gpt-5-5",
-                    raw_model="gpt-5-5",
-                ),
-                None,
-            ),
-        )
-
-        result = sess.on_tui_frame(self._turn_start("system.ai.glm-5-3"))
-
-        assert json.loads(result.frame)["params"]["model"] == "system.ai.gpt-5-5"
 
     def test_routes_first_prompt_to_oss_model(self):
         def select(_prompt):
@@ -737,7 +801,7 @@ def test_routing_request_uses_models_prompt_and_same_token(monkeypatch):
         "workspace": WS,
         "token": "same-oauth-token",
         "task": "Fix the parser",
-        "router_name": "task_v1",
+        "router_name": codex_routing.routing.ROUTER_NAME,
         "timeout": codex_routing.REQUEST_TIMEOUT_S,
         "route_options": [
             ("kimi-k3-neo", "codex"),
@@ -757,6 +821,6 @@ def test_routing_request_uses_models_prompt_and_same_token(monkeypatch):
             {"model": "glm-5-2", "harness": "codex"},
         ],
         "task": {"prompt": "Fix the parser"},
-        "route_selector": {"router_name": "task_v1"},
+        "route_selector": {"router_name": codex_routing.routing.ROUTER_NAME},
     }
     assert "same-oauth-token" not in logged[0]

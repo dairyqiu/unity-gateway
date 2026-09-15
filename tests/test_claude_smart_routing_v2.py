@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import threading
 import time
@@ -13,6 +14,67 @@ import pytest
 from ucode.agents import claude
 from ucode.databricks import AnthropicModelCatalog
 from ucode.smart_routing import claude_hooks, claude_pty, routing, v2
+
+
+class TestManagedModelPicker:
+    def test_reads_model_ids_from_managed_picker(self, tmp_path, monkeypatch):
+        path = tmp_path / "managed-settings.json"
+        path.write_text(
+            json.dumps(
+                {
+                    "modelPicker": {
+                        "options": [
+                            {"model": "system.ai.claude-opus-4-8", "label": "Opus"},
+                            {"model": "system.ai.claude-sonnet-5", "label": "Sonnet"},
+                        ]
+                    }
+                }
+            )
+        )
+        monkeypatch.setattr(claude, "_managed_settings_path", lambda: path)
+
+        catalog = v2._model_picker_catalog()
+
+        assert catalog is not None
+        assert catalog.model_ids == ["system.ai.claude-opus-4-8", "system.ai.claude-sonnet-5"]
+        assert catalog.model_id_to_display_name == {}
+
+    def test_ignores_empty_or_missing_picker(self, tmp_path, monkeypatch):
+        path = tmp_path / "managed-settings.json"
+        path.write_text(json.dumps({"env": {}}))
+        monkeypatch.setattr(claude, "_managed_settings_path", lambda: path)
+        monkeypatch.setattr(claude, "CLAUDE_SETTINGS_PATH", tmp_path / "ucode-settings.json")
+
+        assert v2._model_picker_catalog() is None
+
+    def test_falls_back_to_ucode_settings_picker(self, tmp_path, monkeypatch):
+        managed = tmp_path / "managed-settings.json"
+        managed.write_text(json.dumps({"env": {}}))
+        ucode_settings = tmp_path / "ucode-settings.json"
+        ucode_settings.write_text(
+            json.dumps({"modelPicker": {"options": [{"model": "system.ai.claude-opus-5"}]}})
+        )
+        monkeypatch.setattr(claude, "_managed_settings_path", lambda: managed)
+        monkeypatch.setattr(claude, "CLAUDE_SETTINGS_PATH", ucode_settings)
+
+        catalog = v2._model_picker_catalog()
+
+        assert catalog is not None
+        assert catalog.model_ids == ["system.ai.claude-opus-5"]
+
+    def test_falls_back_to_user_settings_picker(self, tmp_path, monkeypatch):
+        user_settings = tmp_path / "settings.json"
+        user_settings.write_text(
+            json.dumps({"modelPicker": {"options": [{"model": "system.ai.claude-sonnet-5"}]}})
+        )
+        monkeypatch.setattr(claude, "_managed_settings_path", lambda: tmp_path / "missing-managed")
+        monkeypatch.setattr(claude, "CLAUDE_SETTINGS_PATH", tmp_path / "missing-ucode")
+        monkeypatch.setattr(claude, "CLAUDE_USER_SETTINGS_PATH", user_settings)
+
+        catalog = v2._model_picker_catalog()
+
+        assert catalog is not None
+        assert catalog.model_ids == ["system.ai.claude-sonnet-5"]
 
 
 class TestDirectModelCommand:
@@ -104,6 +166,10 @@ class TestFirstPromptHook:
 
 
 class TestV2Launch:
+    def test_strips_gateway_prefix_for_interposer(self):
+        model = "anthropic-aigw-73ea02b2-system.ai.glm-5-2"
+        assert v2._unwrapped_claude_model_id(model) == "system.ai.glm-5-2"
+
     def test_restores_model_captured_immediately_before_switch(self, tmp_path, monkeypatch):
         ucode_settings = tmp_path / "ucode-settings.json"
         user_settings = tmp_path / "settings.json"
@@ -283,6 +349,69 @@ class TestV2Launch:
             "model": v2.CLAUDE_TARGET_MODEL,
             "theme": "dark",
         }
+
+
+class TestV2ModelPickerDiscovery:
+    """modelPicker takes priority over gateway model discovery for smart routing."""
+
+    @staticmethod
+    def _launch(monkeypatch, tmp_path, *, picker_catalog):
+        user_settings = tmp_path / "settings.json"
+        user_settings.write_text(json.dumps({"model": "opus"}))
+        monkeypatch.setattr(v2, "APP_DIR", tmp_path)
+        monkeypatch.setattr(v2, "CLAUDE_PTY_LOG", tmp_path / "v2.log")
+        monkeypatch.setattr(v2, "get_databricks_token", lambda *_args, **_kwargs: "token")
+        monkeypatch.setattr(v2, "build_auth_token_argv", lambda *_args, **_kwargs: ["ucode"])
+        monkeypatch.setattr(v2, "_model_picker_catalog", lambda: picker_catalog)
+
+        discovery_calls = 0
+
+        def fake_discovery(*_args):
+            nonlocal discovery_calls
+            discovery_calls += 1
+            return AnthropicModelCatalog(
+                model_ids=["system.ai.claude-opus-4-8"], model_id_to_display_name={}
+            )
+
+        monkeypatch.setattr(v2, "list_anthropic_model_catalog", fake_discovery)
+        monkeypatch.setattr(claude_pty, "run_claude_pty", lambda _argv, **_kwargs: 0)
+
+        with pytest.raises(SystemExit) as exc:
+            v2.launch_claude(
+                {"workspace": "https://example.com"},
+                [],
+                binary="claude",
+                user_settings_path=user_settings,
+                launch_model="opus",
+                compose_settings=lambda _args: ({}, []),
+                launch_model_args=claude._launch_model_args,
+                model_name=claude._maybe_add_1m_suffix,
+            )
+        assert exc.value.code == 0
+        return discovery_calls
+
+    def test_model_picker_disables_model_discovery(self, tmp_path, monkeypatch):
+        discovery_calls = self._launch(
+            monkeypatch,
+            tmp_path,
+            picker_catalog=AnthropicModelCatalog(
+                model_ids=["system.ai.claude-opus-4-8", "system.ai.claude-sonnet-5"],
+                model_id_to_display_name={},
+            ),
+        )
+        # The picker supplied the models, so discovery never ran and the launch left
+        # gateway model discovery disabled instead of enabling it alongside the picker.
+        assert discovery_calls == 0
+        assert "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY" not in os.environ
+        assert "ENABLE_CLAUDE_CODE_GATEWAY_MODEL_DISCOVERY" not in os.environ
+
+    def test_no_model_picker_enables_model_discovery(self, tmp_path, monkeypatch):
+        discovery_calls = self._launch(monkeypatch, tmp_path, picker_catalog=None)
+        # Without a picker the router falls back to gateway discovery and enables Claude
+        # Code's model-discovery feature for the launch.
+        assert discovery_calls == 1
+        assert os.environ.get("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY") == "1"
+        assert os.environ.get("ENABLE_CLAUDE_CODE_GATEWAY_MODEL_DISCOVERY") == "1"
 
 
 class TestSubagentRouting:

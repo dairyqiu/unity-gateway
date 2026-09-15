@@ -90,6 +90,14 @@ class TestHelp:
         for tool in TOOLS:
             assert tool in result.output
 
+    def test_managed_authoring_commands_are_removed(self):
+        # Authoring moved to the AI Gateway API/UI, so `ug setup` and `ug publish` no longer exist.
+        assert runner.invoke(app, ["setup"]).exit_code != 0
+        assert runner.invoke(app, ["setup", "mcps"]).exit_code != 0
+        assert runner.invoke(app, ["publish"]).exit_code != 0
+        # `ug export` (read-only) stays.
+        assert runner.invoke(app, ["export", "--help"]).exit_code == 0
+
     @pytest.mark.parametrize("prog_name", ["ug", "ucode"])
     def test_help_uses_invoked_name_and_names_ucode_as_an_alias(self, prog_name):
         result = runner.invoke(app, ["--help"], prog_name=prog_name)
@@ -116,6 +124,14 @@ class TestHelp:
         assert "--agents" in output
         assert "comma-separated list of agents" in flat
         assert "--workspaces" in output
+
+    def test_usage_help_is_budget_only(self):
+        result = runner.invoke(app, ["usage", "--help"])
+        output = _strip_ansi(result.output)
+
+        assert result.exit_code == 0
+        assert "dollars spent and total budget" in output
+        assert "--warehouse-id" not in output
 
 
 class TestProjectScripts:
@@ -451,6 +467,25 @@ class TestSubcommandRouting:
         assert "ENABLE_SMART_ROUTING_V2" not in os.environ
         assert mock_launch.call_args.args[1].args == []
 
+    @pytest.mark.parametrize("tool, subcommand", [("codex", "app"), ("claude", "update")])
+    def test_native_subcommand_suppresses_inherited_smart_routing(
+        self, monkeypatch, tool, subcommand
+    ):
+        monkeypatch.setenv("ENABLE_SMART_ROUTING_V2", "1")
+        observed = []
+
+        with patch(
+            "ucode.cli._launch_tool",
+            side_effect=lambda *_args, **_kwargs: observed.append(
+                os.environ.get("ENABLE_SMART_ROUTING_V2")
+            ),
+        ):
+            result = runner.invoke(app, [tool, subcommand])
+
+        assert result.exit_code == 0, result.output
+        assert observed == [None]
+        assert os.environ["ENABLE_SMART_ROUTING_V2"] == "1"
+
     def test_claude_enable_smart_routing_forwards_positional_prompt_to_v2(self):
         captured = []
 
@@ -514,6 +549,30 @@ class TestSubcommandRouting:
 
         assert options.launch_smart_routing is expected
 
+    @pytest.mark.parametrize(
+        ("tool_args", "expected"),
+        [
+            (["--session-id"], True),
+            (["--session-id", "--verbose"], True),
+            (["--session-id", "session-123"], True),
+            (["update"], False),
+            (["update", "--session-id"], False),
+            (["--model", "fixed"], False),
+            (["--session-id", "session-123", "--model", "fixed"], False),
+        ],
+    )
+    def test_claude_options_allow_smart_routing_except_model(self, tool_args, expected):
+        options = cli_mod._launch_options(
+            "claude",
+            tool_args,
+            smart_routing_enabled=True,
+            explicit_prompt=False,
+            model=None,
+            provider=None,
+        )
+
+        assert options.launch_smart_routing is expected
+
     def test_codex_refresh_is_consumed_by_ucode(self):
         with patch("ucode.cli._launch_tool") as mock_launch:
             result = runner.invoke(app, ["codex", "--refresh"])
@@ -521,7 +580,11 @@ class TestSubcommandRouting:
         assert result.exit_code == 0, result.output
         assert mock_launch.call_args.kwargs["refresh"] is True
 
-    def test_codex_forwarded_model_is_reported_in_launch_summary(self):
+    @pytest.mark.parametrize("smart_routing", ["0", "1"])
+    def test_codex_forwarded_model_is_not_printed_in_launch_summary(
+        self, monkeypatch, smart_routing
+    ):
+        monkeypatch.setenv("ENABLE_SMART_ROUTING_V2", smart_routing)
         state = {
             **MINIMAL_STATE,
             "codex_models": ["system.ai.gpt-5-6-luna"],
@@ -547,7 +610,8 @@ class TestSubcommandRouting:
 
         output = _strip_ansi(result.output)
         assert result.exit_code == 0, result.output
-        assert "Model: system.ai.gpt-5-6-sol" in output
+        assert "Smart routing" not in output
+        assert "Model:" not in output
         assert "Model: system.ai.gpt-5-6-luna" not in output
         assert mock_launch.call_args.args[2] == forwarded_args
 
@@ -558,6 +622,39 @@ class TestSubcommandRouting:
         assert result.exit_code == 0, result.output
         assert os.environ["ENABLE_CLAUDE_CODE_GATEWAY_MODEL_DISCOVERY"] == "1"
         assert mock_launch.call_args.args[1].args == []
+
+    def test_claude_parent_is_forwarded(self):
+        with patch("ucode.cli._launch_tool") as mock_launch:
+            result = runner.invoke(app, ["claude", "--parent", "main.default"])
+
+        assert result.exit_code == 0, result.output
+        assert mock_launch.call_args.kwargs["parent_schema"] == "main.default"
+        assert os.environ["ENABLE_CLAUDE_CODE_GATEWAY_MODEL_DISCOVERY"] == "1"
+
+    def test_codex_parent_is_forwarded(self):
+        with patch("ucode.cli._launch_tool") as mock_launch:
+            result = runner.invoke(app, ["codex", "--parent", "main.default"])
+
+        assert result.exit_code == 0, result.output
+        assert mock_launch.call_args.kwargs["parent_schema"] == "main.default"
+
+    def test_codex_provider_and_parent_are_mutually_exclusive(self):
+        result = runner.invoke(
+            app,
+            ["codex", "--provider", "main.default.provider", "--parent", "main.default"],
+        )
+
+        assert result.exit_code == 1
+        assert "--provider and --parent cannot be used together" in result.output
+
+    def test_claude_provider_and_parent_are_mutually_exclusive(self):
+        result = runner.invoke(
+            app,
+            ["claude", "--provider", "main.default.provider", "--parent", "main.default"],
+        )
+
+        assert result.exit_code == 1
+        assert "--provider and --parent cannot be used together" in result.output
 
     def test_claude_enable_model_discovery_is_hidden_from_help(self):
         result = runner.invoke(app, ["claude", "--help"])
@@ -776,7 +873,7 @@ class TestClaudeModelFlag:
             ["-m", "system.ai.claude-sonnet-5"],
         ],
     )
-    def test_forwarded_model_is_reported_in_launch_summary(self, forwarded_args):
+    def test_forwarded_model_is_not_printed_in_launch_summary(self, forwarded_args):
         state = {
             **MINIMAL_STATE,
             "claude_models": {"opus": "system.ai.claude-opus-4-8"},
@@ -801,7 +898,8 @@ class TestClaudeModelFlag:
 
         output = _strip_ansi(result.output)
         assert result.exit_code == 0, result.output
-        assert "Model: system.ai.claude-sonnet-5" in output
+        assert "Smart routing" not in output
+        assert "Model:" not in output
         assert "Model: system.ai.claude-opus-4-8" not in output
         assert mock_launch.call_args.args[2] == forwarded_args
 
@@ -844,6 +942,7 @@ class TestClaudeModelFlag:
 
         assert result.exit_code == 0, result.output
         assert mock_launch.call_args.args[1]["_claude_launch_model"] == "system.ai.glm-5-2"
+        assert mock_launch.call_args.kwargs["options"].launch_smart_routing is False
 
     @staticmethod
     def _provider_launch(monkeypatch, argv, provider_models, relayed=False):
@@ -879,27 +978,27 @@ class TestClaudeModelFlag:
         assert mock_configure.call_args.kwargs["route_root_model"] == "claude-haiku-4-5"
         assert mock_configure.call_args.kwargs["custom_model"] is None
 
-    def test_provider_without_opus_auto_picks_best_servable_tier(self, monkeypatch):
-        # No --model, and the service declares no opus target: launch on the most capable tier it
-        # does offer (sonnet) instead of dead-ending on Claude Code's opus default.
+    def test_provider_without_sonnet_pins_next_tier(self, monkeypatch):
+        # No --model, sonnet not offered: pin the next preferred allowed tier (haiku here) rather
+        # than dead-ending on Claude Code's sonnet default, which this service doesn't allow.
         result, mock_configure, _ = self._provider_launch(
             monkeypatch,
             ["claude", "--provider", "cat.schema.svc"],
-            {"sonnet": "claude-sonnet-5", "haiku": "claude-haiku-4-5"},
+            {"haiku": "claude-haiku-4-5"},
         )
         assert result.exit_code == 0, result.output
-        assert mock_configure.call_args.kwargs["route_root_model"] == "claude-sonnet-5"
+        assert mock_configure.call_args.kwargs["route_root_model"] == "claude-haiku-4-5"
 
-    def test_provider_with_opus_keeps_claude_default(self, monkeypatch):
-        # Opus is offered, so Claude Code's own default already works — pin nothing (no ANTHROPIC_MODEL
-        # and no duplicate /model picker row).
+    def test_provider_with_opus_still_defaults_to_sonnet(self, monkeypatch):
+        # No --model: pin sonnet (Claude Code's default tier) whenever the service allows it, even
+        # when opus is on offer — we always pin an allowed target instead of deferring to the default.
         result, mock_configure, _ = self._provider_launch(
             monkeypatch,
             ["claude", "--provider", "cat.schema.svc"],
             {"opus": "claude-opus-4-8", "sonnet": "claude-sonnet-5"},
         )
         assert result.exit_code == 0, result.output
-        assert mock_configure.call_args.kwargs["route_root_model"] is None
+        assert mock_configure.call_args.kwargs["route_root_model"] == "claude-sonnet-5"
 
     def test_model_family_not_offered_by_provider_errors(self, monkeypatch):
         result, _, _ = self._provider_launch(
@@ -925,7 +1024,7 @@ class TestClaudeModelFlag:
         assert "ignored" not in _strip_ansi(result.output)
 
     def test_relayed_provider_without_model_forwards_nothing(self, monkeypatch):
-        # No --model on a relayed launch: nothing to forward.
+        # No --model on an allow_all relay: nothing to forward.
         result, _, mock_launch = self._provider_launch(
             monkeypatch,
             ["claude", "--provider", "cat.schema.svc"],
@@ -934,6 +1033,39 @@ class TestClaudeModelFlag:
         )
         assert result.exit_code == 0, result.output
         assert mock_launch.call_args.args[2] == []
+
+    def test_relayed_allowlist_resolves_model_to_declared_target(self, monkeypatch):
+        # Curated relay: --model resolves to the declared id, which is what gets forwarded.
+        result, _, mock_launch = self._provider_launch(
+            monkeypatch,
+            ["claude", "--model", "opus", "--provider", "cat.schema.svc"],
+            {"opus": "claude-opus-4-8", "haiku": "claude-haiku-4-5"},
+            relayed=True,
+        )
+        assert result.exit_code == 0, result.output
+        assert mock_launch.call_args.args[2] == ["--model", "claude-opus-4-8"]
+
+    def test_relayed_allowlist_auto_picks_preferred_tier_without_model(self, monkeypatch):
+        # Curated relay, no --model: forward the preferred allowed tier (sonnet), not the (maybe
+        # forbidden) default. Same resolution as the non-relayed path.
+        result, _, mock_launch = self._provider_launch(
+            monkeypatch,
+            ["claude", "--provider", "cat.schema.svc"],
+            {"opus": "claude-opus-4-8", "sonnet": "claude-sonnet-5"},
+            relayed=True,
+        )
+        assert result.exit_code == 0, result.output
+        assert mock_launch.call_args.args[2] == ["--model", "claude-sonnet-5"]
+
+    def test_relayed_allowlist_rejects_unavailable_family(self, monkeypatch):
+        result, _, _ = self._provider_launch(
+            monkeypatch,
+            ["claude", "--model", "opus", "--provider", "cat.schema.svc"],
+            {"sonnet": "claude-sonnet-5", "haiku": "claude-haiku-4-5"},
+            relayed=True,
+        )
+        assert result.exit_code == 1
+        assert "does not offer a 'opus' model" in result.output
 
     def test_provider_sets_transient_claude_launch_marker(self):
         state = dict(MINIMAL_STATE)
@@ -951,6 +1083,40 @@ class TestClaudeModelFlag:
 
         assert result.exit_code == 0, result.output
         assert mock_launch.call_args.args[1]["_claude_launch_provider"] == "main.default.anthropic"
+
+    def test_provider_sets_transient_codex_launch_marker(self):
+        state = dict(MINIMAL_STATE)
+        with (
+            patch("ucode.cli.ensure_bootstrap_dependencies"),
+            patch("ucode.cli.load_state", return_value=state),
+            patch("ucode.cli.ensure_provider_state", return_value=state),
+            patch("ucode.cli.configure_shared_state", return_value=state),
+            patch("ucode.cli.resolve_provider_models", return_value=(None, None, False)),
+            patch("ucode.cli.configure_tool", return_value=state),
+            patch("ucode.cli._fetch_managed_config", return_value=(None, False)),
+            patch("ucode.cli.launch_agent") as mock_launch,
+        ):
+            result = runner.invoke(app, ["codex", "--provider", "main.default.openai"])
+
+        assert result.exit_code == 0, result.output
+        assert mock_launch.call_args.args[1]["_codex_launch_provider"] == "main.default.openai"
+
+    def test_parent_sets_transient_codex_launch_marker(self):
+        state = dict(MINIMAL_STATE)
+        with (
+            patch("ucode.cli.ensure_bootstrap_dependencies"),
+            patch("ucode.cli.load_state", return_value=state),
+            patch("ucode.cli.ensure_provider_state", return_value=state),
+            patch("ucode.cli.configure_shared_state", return_value=state),
+            patch("ucode.cli.resolve_launch_model", return_value=(state, "system.ai.gpt-5")),
+            patch("ucode.cli.configure_tool", return_value=state),
+            patch("ucode.cli._fetch_managed_config", return_value=(None, False)),
+            patch("ucode.cli.launch_agent") as mock_launch,
+        ):
+            result = runner.invoke(app, ["codex", "--parent", "main.default"])
+
+        assert result.exit_code == 0, result.output
+        assert mock_launch.call_args.args[1]["_codex_launch_parent_schema"] == "main.default"
 
 
 class TestGeminiProviderLaunch:
@@ -972,11 +1138,10 @@ class TestGeminiProviderLaunch:
         monkeypatch.setattr("ucode.cli.launch_agent", mock_launch)
         return runner.invoke(app, ["gemini", "--provider", "cat.schema.svc"])
 
-    def test_prints_resolved_target_model(self, monkeypatch):
-        # The concrete target gemini pins must show in the launch summary (not just the provider).
+    def test_does_not_print_resolved_target_model(self, monkeypatch):
         result = self._launch(monkeypatch, lambda t, s, p: (None, None, False))
         assert result.exit_code == 0, result.output
-        assert "Model: gemini-3.5-flash" in _strip_ansi(result.output)
+        assert "Model:" not in _strip_ansi(result.output)
 
     def test_skips_resolve_provider_models(self, monkeypatch):
         # Gemini resolves its own target, so the claude-family lookup must not run (no double fetch).
@@ -1355,13 +1520,13 @@ class TestSkillsAddCommand:
         with patch("ucode.cli.add_skills_command") as mock_add:
             result = runner.invoke(app, ["skill", "add", "--location", "a.b", "--mcp"])
         assert result.exit_code == 0, result.output
-        mock_add.assert_called_once_with(["a.b"])
+        mock_add.assert_called_once_with(["a.b"], agents=None)
 
     def test_comma_location_yields_multiple_schemas(self):
         with patch("ucode.cli.add_skills_command") as mock_add:
             result = runner.invoke(app, ["skill", "add", "--location", "a.b, c.d", "--mcp"])
         assert result.exit_code == 0, result.output
-        mock_add.assert_called_once_with(["a.b", "c.d"])
+        mock_add.assert_called_once_with(["a.b", "c.d"], agents=None)
 
     def test_default_mode_dispatches_download(self):
         with patch("ucode.cli.configure_skills_download_command") as mock_download:
@@ -1467,73 +1632,163 @@ class TestSkillsAddCommand:
         assert "--location" in _strip_ansi(result.output)
         mock_add.assert_not_called()
 
+    def test_agents_scope_delegates_to_helper_and_forwards_returned_scope(self):
+        with (
+            patch(
+                "ucode.cli._configure_agents_for_mcp", return_value={"claude", "codex"}
+            ) as configure,
+            patch("ucode.cli.add_skills_command") as mock_add,
+        ):
+            result = runner.invoke(
+                app,
+                ["skill", "add", "--location", "a.b", "--mcp", "--agents", "codex,claude"],
+            )
 
-class TestApplyManagedSkills:
-    """The launch path both registers the skills MCP connection and downloads bundles to disk."""
+        assert result.exit_code == 0, result.output
+        configure.assert_called_once_with(["claude", "codex"])
+        mock_add.assert_called_once_with(["a.b"], agents={"claude", "codex"})
+
+    def test_empty_agents_folds_to_global_scope(self):
+        with (
+            patch("ucode.cli._configure_agents_for_mcp") as configure,
+            patch("ucode.cli.add_skills_command") as mock_add,
+        ):
+            result = runner.invoke(
+                app,
+                ["skill", "add", "--location", "a.b", "--mcp", "--agents", ","],
+            )
+
+        assert result.exit_code == 0, result.output
+        configure.assert_not_called()
+        mock_add.assert_called_once_with(["a.b"], agents=None)
+
+    def test_agents_is_rejected_for_download_mode(self):
+        with patch("ucode.cli.configure_skills_download_command") as mock_download:
+            result = runner.invoke(app, ["skill", "add", "--location", "a.b", "--agents", "claude"])
+
+        assert result.exit_code == 1
+        assert "--agents is only supported when using --mcp" in _strip_ansi(result.output)
+        mock_download.assert_not_called()
+
+
+class TestConfigureAgentsForMcp:
+    def test_bootstraps_only_unconfigured_and_returns_full_scope(self):
+        with (
+            patch("ucode.cli.load_state", return_value={"workspace": "https://ws"}),
+            patch("ucode.cli.available_mcp_clients", return_value=["claude", "codex"]),
+            patch("ucode.cli.configured_mcp_clients", return_value=["claude"]),
+            patch("ucode.cli.configure_workspace_command") as mock_cfg,
+        ):
+            scope = cli_mod._configure_agents_for_mcp(["claude", "codex"])
+
+        assert scope == {"claude", "codex"}
+        mock_cfg.assert_called_once_with(selected_tools=["codex"], prompt_optional_updates=True)
+
+    def test_all_configured_skips_bootstrap(self):
+        with (
+            patch("ucode.cli.load_state", return_value={"workspace": "https://ws"}),
+            patch("ucode.cli.available_mcp_clients", return_value=["claude", "codex"]),
+            patch("ucode.cli.configured_mcp_clients", return_value=["claude", "codex"]),
+            patch("ucode.cli.configure_workspace_command") as mock_cfg,
+        ):
+            scope = cli_mod._configure_agents_for_mcp(["claude", "codex"])
+
+        assert scope == {"claude", "codex"}
+        mock_cfg.assert_not_called()
+
+
+class TestSkillsRemoveCommand:
+    def test_requires_mcp_until_download_removal_is_supported(self):
+        with patch("ucode.cli.remove_skills_command") as remove:
+            result = runner.invoke(app, ["skill", "remove"])
+
+        assert result.exit_code == 1
+        assert "Removing downloaded skills is not supported yet" in _strip_ansi(result.output)
+        remove.assert_not_called()
+
+    def test_mcp_remove_dispatches_global_removal(self):
+        with patch("ucode.cli.remove_skills_command") as remove:
+            result = runner.invoke(app, ["skill", "remove", "--mcp"])
+
+        assert result.exit_code == 0, result.output
+        remove.assert_called_once_with(agents=None)
+
+    def test_mcp_remove_forwards_agent_scope(self):
+        with patch("ucode.cli.remove_skills_command") as remove:
+            result = runner.invoke(app, ["skill", "remove", "--mcp", "--agents", "claude, codex"])
+
+        assert result.exit_code == 0, result.output
+        remove.assert_called_once_with(agents={"claude", "codex"})
+
+
+class TestManagedSkillsOnLaunch:
+    """Managed skills are delivered by download only: the launch path downloads them and never
+    registers them on the skills MCP connection (only a developer's own `skill add --mcp` schemas
+    live there)."""
 
     def _state(self):
         return {"workspace": "https://example.databricks.com", "profile": "prod"}
 
-    def test_downloads_managed_skill_schemas_to_disk(self):
-        managed = {"skills": {"names": ["main.default", "ml.prod"]}}
+    def _launch(self, monkeypatch, *, managed):
+        state = dict(MINIMAL_STATE)
+        monkeypatch.setattr("ucode.cli.get_model_recommendation", lambda ws, tok: (None, None))
         with (
-            patch("ucode.cli.apply_managed_skills", return_value=["main.default"]) as mock_apply,
-            patch("ucode.cli.get_databricks_token", return_value="tok") as mock_token,
+            patch("ucode.cli.load_state", return_value=state),
+            patch("ucode.cli.apply_pat_environment"),
+            patch("ucode.cli.ensure_bootstrap_dependencies"),
+            patch("ucode.cli.ensure_provider_state", return_value=state),
+            patch("ucode.cli.configure_shared_state", return_value=state),
+            patch("ucode.cli.configure_tool", return_value=state),
+            patch("ucode.cli.get_databricks_token", return_value="tok"),
+            patch("ucode.cli._fetch_managed_config", return_value=(managed, False)),
+            patch("ucode.cli.apply_managed_mcp_servers", return_value=[]),
+            patch("ucode.cli.launch_agent"),
             patch(
-                "ucode.cli.download_managed_skills_on_launch", return_value=["triage"]
+                "ucode.cli.download_managed_skills_on_launch", return_value=["main.default"]
             ) as mock_dl,
         ):
-            from ucode import cli
+            result = runner.invoke(app, ["claude"])
+        return result, state, mock_dl
 
-            cli._apply_managed_skills(managed, "claude", self._state())
+    def test_launch_downloads_managed_skills_and_skips_mcp_registration(self, monkeypatch):
+        from ucode import cli
 
-        mock_apply.assert_called_once()
-        mock_token.assert_called_once_with("https://example.databricks.com", "prod")
+        managed = {
+            "enabled_agents": {"claude": {}},
+            "skills": {"names": ["main.default", "ml.prod"]},
+        }
+        result, state, mock_dl = self._launch(monkeypatch, managed=managed)
+
+        assert result.exit_code == 0, result.output
         mock_dl.assert_called_once_with(
             "https://example.databricks.com", "tok", ["main.default", "ml.prod"]
         )
+        skills = [
+            s for s in (state.get("mcp_servers") or []) if s.get("kind") == cli.SKILLS_MCP_KIND
+        ]
+        assert skills == []
 
     def test_no_managed_skills_skips_the_download(self):
         with (
-            patch("ucode.cli.apply_managed_skills", return_value=[]),
             patch("ucode.cli.get_databricks_token") as mock_token,
             patch("ucode.cli.download_managed_skills_on_launch") as mock_dl,
         ):
             from ucode import cli
 
-            cli._apply_managed_skills({}, "claude", self._state())
+            cli._download_managed_skills({}, self._state())
 
         mock_token.assert_not_called()
         mock_dl.assert_not_called()
 
-    def test_download_still_runs_when_mcp_registration_fails(self):
-        # A failure registering the MCP connection must not stop the disk download — the two are
-        # independent ways skills reach the agent, and /skills depends only on the disk write.
-        with (
-            patch("ucode.cli.apply_managed_skills", side_effect=RuntimeError("boom")),
-            patch("ucode.cli.get_databricks_token", return_value="tok"),
-            patch("ucode.cli.download_managed_skills_on_launch", return_value=[]) as mock_dl,
-        ):
-            from ucode import cli
-
-            cli._apply_managed_skills(
-                {"skills": {"names": ["main.default"]}}, "claude", self._state()
-            )
-
-        mock_dl.assert_called_once()
-
     def test_download_failure_never_blocks_launch(self):
         with (
-            patch("ucode.cli.apply_managed_skills", return_value=[]),
             patch("ucode.cli.get_databricks_token", side_effect=RuntimeError("no auth")),
             patch("ucode.cli.download_managed_skills_on_launch") as mock_dl,
         ):
             from ucode import cli
 
             # Must not raise.
-            cli._apply_managed_skills(
-                {"skills": {"names": ["main.default"]}}, "claude", self._state()
-            )
+            cli._download_managed_skills({"skills": {"names": ["main.default"]}}, self._state())
 
         mock_dl.assert_not_called()
 
@@ -1619,6 +1874,32 @@ class TestStatusSkillsSection:
                 assert "databricks-skill-registry" not in line
         assert "Skill MCP Locations: main.default" in out
 
+    def test_renders_per_agent_locations_when_scopes_diverge(self):
+        state = {
+            **MINIMAL_STATE,
+            "mcp_servers": [
+                {
+                    "name": "databricks-skill-registry",
+                    "kind": "skills",
+                    "skill_locations": ["main.default", "claude.only"],
+                    "skill_locations_by_client": {
+                        "claude": ["main.default", "claude.only"],
+                        "codex": ["main.default"],
+                    },
+                    "url": "https://example.databricks.com/ai-gateway/skills/?schema=main.default&schema=claude.only",
+                    "auth": "proxy",
+                    "clients": ["claude", "codex"],
+                }
+            ],
+        }
+
+        result = self._run(state)
+
+        assert result.exit_code == 0, result.output
+        out = _strip_ansi(result.output)
+        assert "Claude Code skill MCP locations: main.default, claude.only" in out
+        assert "Codex skill MCP locations: main.default" in out
+
 
 class TestRevert:
     def test_reverts_mcp_configs_before_clearing_state(self):
@@ -1663,6 +1944,38 @@ class TestDoctorCommand:
 
 
 class TestAutoConfigureOnFirstRun:
+    @pytest.mark.parametrize("tool", list(cli_mod.TOOL_SPECS))
+    @pytest.mark.parametrize("has_workspace", [False, True])
+    def test_launch_autoconfigures_without_test_prompt(self, tool, has_workspace):
+        initial_state = {**MINIMAL_STATE, "available_tools": []} if has_workspace else {}
+        configured_state = {**MINIMAL_STATE, "available_tools": [tool]}
+        with (
+            patch("ucode.cli.ensure_bootstrap_dependencies"),
+            patch("ucode.cli.load_state", return_value=initial_state),
+            patch(
+                "ucode.cli._prompt_for_configuration",
+                return_value=(MINIMAL_STATE["workspace"], None),
+            ),
+            patch("ucode.cli.configure_shared_state", return_value=configured_state),
+            patch(
+                "ucode.cli.configure_single_tool", return_value=configured_state
+            ) as mock_configure,
+            patch("ucode.cli.ensure_provider_state", return_value=configured_state),
+            patch("ucode.cli._fetch_managed_config", return_value=(None, False)),
+            patch("ucode.cli.configure_tool", return_value=configured_state),
+            patch("ucode.cli.validate_tool", return_value=(False, "timed out")) as mock_validate,
+            patch("ucode.cli.restore_file") as mock_restore,
+            patch("ucode.cli.launch_agent") as mock_launch,
+        ):
+            result = runner.invoke(app, [tool])
+
+        assert result.exit_code == 0, result.output
+        mock_configure.assert_called_once_with(tool, configured_state)
+        mock_validate.assert_not_called()
+        mock_restore.assert_not_called()
+        mock_launch.assert_called_once()
+        assert mock_launch.call_args.args[:2] == (tool, configured_state)
+
     def test_triggers_when_no_workspace(self):
         """Auto-configure runs when state has no workspace."""
         empty_state = {}
@@ -2344,6 +2657,7 @@ class TestConfigureAgentsSelection:
             use_pat=False,
             fable_enabled=None,
             databricks_ai_tools_enabled=None,
+            clear_custom_oauth=False,
         ):
             captured["workspace"] = workspace
             captured["profile"] = profile
@@ -2382,6 +2696,7 @@ class TestConfigureAgentsSelection:
             use_pat=False,
             fable_enabled=None,
             databricks_ai_tools_enabled=None,
+            clear_custom_oauth=False,
         ):
             configured_shared.append(
                 (workspace, profile, tuple(tools) if tools is not None else None, force_login)
@@ -2689,21 +3004,18 @@ class TestConfigureSharedStateUsePat:
         ("responses", "expected_model_service"),
         [
             (
-                [({}, None), ({"endpoints": []}, None)],
+                [({}, None)],
                 "reachable, no accessible model services returned; check USE CATALOG on system, "
                 "and USE SCHEMA and EXECUTE on system.ai",
             ),
             (
-                [
-                    (None, "HTTP 403 Forbidden"),
-                    ({"endpoints": [{"name": "databricks-gpt-5"}]}, None),
-                ],
-                "HTTP 403 Forbidden",
+                [({"next_page_token": "more"}, None)] * db_mod._MODEL_SERVICE_PROBE_MAX_PAGES,
+                "reachable",
             ),
         ],
         ids=[
-            "model-service-empty-legacy-empty",
-            "model-service-forbidden-legacy-resource",
+            "model-service-empty",
+            "model-service-inconclusive",
         ],
     )
     def test_prints_warning_when_model_service_not_detected(
@@ -2733,28 +3045,18 @@ class TestConfigureSharedStateUsePat:
         ("responses", "error_match"),
         [
             (
-                [
-                    ({}, None),
-                    (
-                        None,
-                        "HTTP 404 Not Found: AI Gateway V2 is not available for CSP-enabled "
-                        "workspaces",
-                    ),
-                ],
-                "no accessible model services",
+                [(None, "HTTP 404 Not Found: model service unavailable")],
+                "not enabled",
             ),
             (
-                [
-                    (None, "HTTP 404 Not Found: V3 unavailable"),
-                    (None, "HTTP 404 Not Found: V2 unavailable"),
-                ],
-                "neither model services",
+                [(None, "HTTP 403 Forbidden: Missing Unity Catalog grants")],
+                "model service access could not be verified",
             ),
             ([(None, "HTTP 401 Unauthorized")], "rejected the access token"),
         ],
         ids=[
-            "model-service-empty-legacy-unavailable",
-            "neither-path-reachable",
+            "model-service-unavailable",
+            "model-service-forbidden",
             "invalid-token",
         ],
     )
@@ -3034,7 +3336,9 @@ class TestConfigureSkipValidate:
         assert result == 0
         assert validated == []
 
-    def test_skip_validate_skips_single_tool_validation(self, monkeypatch):
+    @pytest.mark.parametrize("skip_validate", [False, True])
+    @pytest.mark.parametrize("tool", list(cli_mod.TOOL_SPECS))
+    def test_single_tool_validation_is_optional(self, monkeypatch, skip_validate, tool):
         import ucode.cli as cli_mod
 
         state = {**MINIMAL_STATE, "workspace": "https://first.com"}
@@ -3050,16 +3354,16 @@ class TestConfigureSkipValidate:
         monkeypatch.setattr(cli_mod, "validate_tool", lambda t: validated.append(t) or (True, ""))
 
         result = cli_mod.configure_workspace_command(
-            "claude",
+            tool,
             workspaces=[("https://first.com", None)],
-            skip_validate=True,
+            skip_validate=skip_validate,
         )
 
         assert result == 0
-        assert validated == []
+        assert validated == ([] if skip_validate else [tool])
         # `ucode configure` (single-agent) still installs AI Tools — it's the
         # configure path, unlike launch which auto-configures without installing.
-        assert installed == [["claude"]]
+        assert installed == [[tool]]
 
 
 class TestConfigureSharedStateMcpCleanup:
@@ -3368,7 +3672,6 @@ class TestBareUcode:
         monkeypatch,
         *,
         managed,
-        is_admin=False,
         args=None,
         cached=None,
         coding_agent_config_feature_disabled=False,
@@ -3384,8 +3687,6 @@ class TestBareUcode:
             monkeypatch.setattr("ucode.cli.refresh_managed_config", lambda state: (managed, False))
 
         monkeypatch.setattr("ucode.cli.load_managed_state", lambda ws: cached)
-        monkeypatch.setattr("ucode.cli.get_databricks_token", lambda *a, **k: "tok")
-        monkeypatch.setattr("ucode.cli.is_workspace_admin", lambda *a, **k: is_admin)
         monkeypatch.setattr(
             "ucode.cli._launch_tool",
             lambda tool, ctx, **kw: launched.append((tool, kw)),
@@ -3436,21 +3737,20 @@ class TestBareUcode:
         assert "launching OpenCode" in result.output
         assert "as the default agent" not in result.output
 
-    def test_admin_without_a_config_is_pointed_at_setup(self, monkeypatch):
-        result, launched = self._run(monkeypatch, managed=None, is_admin=True)
+    def test_no_config_points_the_dev_at_configure(self, monkeypatch):
+        # With no managed config a developer can still set up locally, so the guidance points at
+        # `ug configure` (not the removed authoring commands).
+        result, launched = self._run(monkeypatch, managed=None)
         assert result.exit_code == 0, result.output
         assert launched == []
-        assert "ug setup" in result.output
-
-    def test_non_admin_without_a_config_is_told_to_ask(self, monkeypatch):
-        result, launched = self._run(monkeypatch, managed=None, is_admin=False)
-        assert result.exit_code == 0, result.output
-        assert launched == []
-        assert "Ask a workspace admin" in result.output
+        flat = " ".join(result.output.split())
+        assert "ug configure" in flat
+        assert "ug setup" not in flat
+        assert "ug publish" not in flat
 
     def test_feature_disabled_guides_without_managed_mention(self, monkeypatch):
         result, launched = self._run(
-            monkeypatch, managed=None, is_admin=True, coding_agent_config_feature_disabled=True
+            monkeypatch, managed=None, coding_agent_config_feature_disabled=True
         )
         assert result.exit_code == 0, result.output
         assert launched == []
@@ -3487,10 +3787,6 @@ class TestBareUcode:
             lambda state: pytest.fail("--dry-run must not fetch"),
         )
         monkeypatch.setattr("ucode.cli.load_managed_state", lambda ws: None)
-        # The no-config guidance checks admin status; stub the token/admin calls so the test
-        # doesn't shell out to the `databricks` binary (absent in CI).
-        monkeypatch.setattr("ucode.cli.get_databricks_token", lambda *a, **k: "tok")
-        monkeypatch.setattr("ucode.cli.is_workspace_admin", lambda *a, **k: False)
         monkeypatch.setattr(
             "ucode.cli._launch_tool",
             lambda *a, **k: pytest.fail("nothing to launch without a config"),
@@ -3705,3 +4001,73 @@ class TestMcpProxyCmdForwardsUsePat:
         result, captured = self._invoke(monkeypatch, flag=False, state={"workspace": "https://x"})
         assert result.exit_code == 0, result.output
         assert captured["kwargs"]["use_pat"] is False
+
+
+class TestForcedLoginWithExternalBearer:
+    """`configure --workspaces` forces `databricks auth login`, which cannot help
+    when a bearer (or a command that mints one) is supplied from outside: the
+    login is interactive, and `get_databricks_token` returns before it would ever
+    reach the OAuth path. A sandbox whose credential comes from a broker would
+    otherwise hang on a browser prompt it can never satisfy."""
+
+    _SENTINEL = "stop-after-auth"
+
+    def _run(self, monkeypatch) -> list:
+        """Drive configure_shared_state's auth branch, stopping right after it."""
+        calls: list = []
+        monkeypatch.setattr(
+            cli_mod, "run_databricks_login", lambda ws, profile=None: calls.append(ws)
+        )
+        monkeypatch.setattr(cli_mod, "ensure_databricks_auth", lambda *a, **k: None)
+        monkeypatch.setattr(cli_mod, "find_profile_name_for_host", lambda ws: None)
+
+        def stop(*_a, **_k):
+            raise RuntimeError(self._SENTINEL)
+
+        monkeypatch.setattr(cli_mod, "get_databricks_token", stop)
+        with pytest.raises(RuntimeError, match=self._SENTINEL):
+            cli_mod.configure_shared_state("https://ws.cloud.databricks.com", force_login=True)
+        return calls
+
+    def test_bearer_command_skips_the_interactive_login(self, monkeypatch):
+        monkeypatch.setenv("DATABRICKS_BEARER_COMMAND", "/opt/broker/mint.sh")
+        monkeypatch.delenv("DATABRICKS_BEARER", raising=False)
+
+        assert self._run(monkeypatch) == []
+
+    def test_static_bearer_skips_the_interactive_login(self, monkeypatch):
+        monkeypatch.setenv("DATABRICKS_BEARER", "ci-bearer")
+        monkeypatch.delenv("DATABRICKS_BEARER_COMMAND", raising=False)
+
+        assert self._run(monkeypatch) == []
+
+    def test_still_logs_in_when_nothing_external_is_set(self, monkeypatch):
+        monkeypatch.delenv("DATABRICKS_BEARER", raising=False)
+        monkeypatch.delenv("DATABRICKS_BEARER_COMMAND", raising=False)
+
+        assert self._run(monkeypatch) == ["https://ws.cloud.databricks.com"]
+
+
+class TestStdioProtocolLaunch:
+    """`codex app-server` owns stdout, so ug's status output moves to stderr."""
+
+    def test_app_server_subcommand_owns_stdout(self):
+        assert cli_mod._child_owns_stdout("codex", ["app-server", "--listen", "stdio://"]) is True
+
+    def test_other_codex_launches_keep_stdout(self):
+        assert cli_mod._child_owns_stdout("codex", []) is False
+        assert cli_mod._child_owns_stdout("codex", ["exec", "--json", "hi"]) is False
+
+    def test_other_agents_never_own_stdout(self):
+        assert cli_mod._child_owns_stdout("claude", ["app-server"]) is False
+        assert cli_mod._child_owns_stdout("gemini", []) is False
+
+    def test_redirect_rebinds_stdout_without_touching_the_descriptor(self):
+        import sys
+
+        real_stdout = sys.stdout
+        try:
+            cli_mod.redirect_output_to_stderr()
+            assert sys.stdout is sys.stderr
+        finally:
+            sys.stdout = real_stdout
