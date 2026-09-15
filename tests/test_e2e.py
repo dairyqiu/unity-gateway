@@ -89,12 +89,8 @@ def _run_agent(
     )
 
 
-# Every per-model launch test fires a real inference request at the shared test workspace's
-# ai-gateway, which enforces a per-workspace rate limit. When several CI jobs run their per-model
-# suites at once the combined load trips 429s. Codex's own retry budget expires in about three
-# seconds, too fast for the limit window to reset under that load, so retry here with a longer
-# backoff. If a launch is still throttled after the retries, the caller skips instead of failing
-# so a saturated shared workspace does not red the CI of unrelated PRs.
+# The per-model launch tests share one rate-limited test workspace, so concurrent CI jobs trip
+# 429s. codex's own retry gives up too fast to outlast the limit window, hence the extra backoff.
 _RATE_LIMIT_MARKERS = ("429", "too many requests", "exceeded retry limit")
 
 
@@ -104,12 +100,11 @@ def _looks_rate_limited(text: str) -> bool:
 
 
 def _run_agent_retrying_rate_limits(
-    cmd: list[str], env: dict | None = None, timeout: int = 60, attempts: int = 3
+    cmd: list[str], env: dict | None = None, timeout: int = 60, attempts: int = 5
 ) -> subprocess.CompletedProcess:
-    """Like ``_run_agent`` but retry with exponential backoff while the launch is rate-limited.
+    """``_run_agent`` that retries with exponential backoff only while the launch is rate-limited.
 
-    Only 429s are retried; a clean exit or any non-rate-limit result returns immediately, and
-    ``TimeoutExpired`` propagates so callers keep their existing timeout handling."""
+    A clean exit or a non-429 failure returns immediately; ``TimeoutExpired`` propagates."""
     delay = 5.0
     result = _run_agent(cmd, env=env, timeout=timeout)
     for _retry in range(attempts - 1):
@@ -122,9 +117,9 @@ def _run_agent_retrying_rate_limits(
 
 
 def _skip_if_all_rate_limited(failures: list[str], harness: str) -> None:
-    """Skip instead of failing when every remaining failure is a shared-workspace 429.
+    """Skip when every remaining failure is a 429, so a saturated workspace does not fail the PR.
 
-    A genuine regression produces a non-rate-limit failure, which still trips the caller's assert."""
+    Any non-429 failure falls through to the caller's assert."""
     if failures and all(_looks_rate_limited(failure) for failure in failures):
         pytest.skip(
             f"{harness} ai-gateway still rate-limited (429) after retries; "
