@@ -874,6 +874,26 @@ class TestCodexLaunch:
         )
         assert 'Databricks-Model-Service-Parent-Schema = "main.default"' in parent_arg
 
+    def test_parent_schema_does_not_pin_a_model(self, tmp_path, monkeypatch):
+        # A unity_catalog_location launch must leave model choice to the user (`/model`); pinning
+        # `-c model=` would override their selection (MPS pins; parent-schema discovery does not).
+        launches = self._patch(tmp_path, monkeypatch)
+        catalog = {"models": [{"slug": "main.default.first"}, {"slug": "main.default.second"}]}
+        monkeypatch.setattr(
+            codex, "_model_catalog_path", lambda workspace, scope: tmp_path / "models.json"
+        )
+        monkeypatch.setattr(
+            codex, "_fetch_codex_model_catalog", lambda workspace, token, **kwargs: catalog
+        )
+
+        codex.launch(
+            {"workspace": WS, "_codex_launch_parent_schema": "main.default"},
+            [],
+            options=LaunchOptions(),
+        )
+
+        assert not any(arg.startswith("model=") for arg in launches[0])
+
     def test_parent_discovery_refreshes_when_parent_changes(self, tmp_path, monkeypatch):
         launches = self._patch(tmp_path, monkeypatch)
         monkeypatch.setattr(codex, "CODEX_MODEL_CATALOG_PATH", tmp_path / "models.json")

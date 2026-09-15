@@ -777,11 +777,17 @@ def launch(
             catalog_path = _model_catalog_path(workspace, catalog_scope)
             _write_model_catalog(catalog_path, catalog)
             profile_doc["model_catalog_json"] = str(catalog_path)
-            # Codex otherwise boots on its bundled default model (e.g. gpt-5.6-sol),
-            # which an MPS's allowlist doesn't route, so the first request 403s. Pin
-            # the MPS's primary (first) target unless the user chose a model or a
-            # managed default already applies.
-            if not profile_doc.get("model") and not _tool_args_select_model(tool_args):
+            # Under an MPS, Codex's bundled default model (e.g. gpt-5.6-sol) isn't in the
+            # allowlist, so the first request 403s; pin the MPS's primary (first) target unless
+            # the user chose a model or a managed default already applies. A parent-schema
+            # (unity_catalog_location) launch instead lets the user pick any discovered model
+            # via `/model`, so we must NOT pin one here — a pinned `-c model=` would override
+            # that selection.
+            if (
+                provider is not None
+                and not profile_doc.get("model")
+                and not _tool_args_select_model(tool_args)
+            ):
                 slugs = catalog_slugs(catalog)
                 if slugs:
                     profile_doc["model"] = slugs[0]
