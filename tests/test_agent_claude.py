@@ -536,6 +536,8 @@ class TestRenderOverlayOtelTracing:
         # HTTP requires the full /v1/traces path on the per-signal endpoint.
         assert env["OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"] == f"{WS}/ai-gateway/otel/v1/traces"
         assert env["CLAUDE_CODE_OTEL_HEADERS_HELPER_DEBOUNCE_MS"] == "900000"
+        # traceparent propagation lets the gateway link its server span to the client span.
+        assert env["CLAUDE_CODE_PROPAGATE_TRACEPARENT"] == "1"
         # A refreshing helper supplies the bearer — never a static (stale-prone) header.
         assert "otel-headers" in overlay["otelHeadersHelper"]
         assert "OTEL_EXPORTER_OTLP_TRACES_HEADERS" not in env
