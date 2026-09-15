@@ -24,7 +24,11 @@ from ucode.config_io import (
     read_json_safe,
     write_json_file,
 )
-from ucode.constants import LOOPBACK_HOST
+from ucode.constants import (
+    LOOPBACK_HOST,
+    MODEL_PROVIDER_SERVICE_HEADER,
+    MODEL_SERVICE_PARENT_SCHEMA_HEADER,
+)
 from ucode.custom_oauth import CustomOAuthConfig, build_custom_auth_shell_command
 from ucode.databricks import (
     build_auth_shell_command,
@@ -50,7 +54,7 @@ from ucode.smart_routing.claude_hooks import (
     remove_smart_routing_hooks,
     sync_smart_routing_hooks,
 )
-from ucode.state import MANAGED_OVERLAY_KEY, get_provider_service, mark_tool_managed, save_state
+from ucode.state import MANAGED_OVERLAY_KEY, is_tool_managed, mark_tool_managed, save_state
 from ucode.telemetry import agent_version, ucode_version
 from ucode.tracing import tracing_env
 from ucode.ui import print_note, print_success, print_warning
@@ -169,7 +173,8 @@ CLAUDE_MANAGED_CUSTOM_HEADER_NAMES = frozenset(
     {
         "x-databricks-use-coding-agent-mode",
         "user-agent",
-        "databricks-model-provider-service",
+        MODEL_PROVIDER_SERVICE_HEADER.casefold(),
+        MODEL_SERVICE_PARENT_SCHEMA_HEADER.casefold(),
     }
 )
 CLAUDE_TRACING_STOP_HOOK_SUFFIX = " autolog claude stop-hook"
@@ -324,6 +329,7 @@ def render_overlay(
     relayed_base_url: str | None = None,
     route_root_model: str | None = None,
     custom_model: str | None = None,
+    parent_schema: str | None = None,
 ) -> tuple[dict, list[list[str]]]:
     """Return (overlay, managed_key_paths) for Claude settings.json.
 
@@ -360,7 +366,9 @@ def render_overlay(
         f"User-Agent: ucode/{ucode_version()} claude/{agent_version('claude')}",
     ]
     if provider:
-        header_lines.append(f"Databricks-Model-Provider-Service: {provider}")
+        header_lines.append(f"{MODEL_PROVIDER_SERVICE_HEADER}: {provider}")
+    elif parent_schema:
+        header_lines.append(f"{MODEL_SERVICE_PARENT_SCHEMA_HEADER}: {parent_schema}")
     # Relayed: the X-Databricks-AI-Gateway-Token swap header is added per request
     # by the refresh proxy, not here — a static value would go stale mid-session.
     custom_headers = "\n".join(header_lines)
@@ -575,8 +583,13 @@ def write_tool_config(
     route_root_model: str | None = None,
     custom_model: str | None = None,
     coding_agent_config_defaults: dict[str, str] | None = None,
+    parent_schema: str | None = None,
 ) -> dict:
-    backup_existing_file(CLAUDE_SETTINGS_PATH, CLAUDE_BACKUP_PATH)
+    # Back up only a file that predates ucode's management of the tool. A
+    # re-configure would otherwise snapshot ucode's own generated file, and
+    # revert would restore that snapshot instead of deleting the file.
+    if not is_tool_managed(state, "claude"):
+        backup_existing_file(CLAUDE_SETTINGS_PATH, CLAUDE_BACKUP_PATH)
     web_search_model = _resolve_web_search_model(state)
     # Relayed inference points at a local refresh proxy; its loopback base URL is
     # recorded in state so launch starts the proxy on the matching port.
@@ -596,6 +609,7 @@ def write_tool_config(
         relayed_base_url=relayed_base_url,
         route_root_model=route_root_model,
         custom_model=custom_model,
+        parent_schema=parent_schema,
     )
     tracing_env_vars = tracing_env(state, "claude")
     stop_hook_command = claude_tracing_stop_hook_command() if tracing_env_vars else None
@@ -704,7 +718,7 @@ def write_tool_config(
 
     _reconcile_managed_settings(
         state,
-        lambda base: _compose(base, enforce_model_default_hierarchy=True),
+        lambda base: _compose(base, enforce_model_default_hierarchy=provider is None),
         managed_file_keys,
         relayed,
     )
@@ -1164,13 +1178,6 @@ def _original_launch_model(state: dict) -> str | None:
     return default_model(state)
 
 
-def _has_provider_launch(state: dict) -> bool:
-    transient = state.get("_claude_launch_provider")
-    return (isinstance(transient, str) and bool(transient.strip())) or bool(
-        get_provider_service(state, "claude")
-    )
-
-
 def _launch_model_args(tool_args: list[str], launch_model: str | None) -> list[str]:
     if not launch_model or has_explicit_model_arg(tool_args):
         return []
@@ -1327,6 +1334,10 @@ def launch(
 ) -> None:
     binary = SPEC["binary"]
     workspace = state.get("workspace")
+    if workspace and os.environ.get(GATEWAY_MODEL_DISCOVERY_ENV_VAR) == "1":
+        # Discovery is launch-scoped. Pass it in the process environment rather
+        # than persisting it in Claude's private or OS-managed settings.
+        os.environ["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1"
     if state.get("claude_relayed"):
         _launch_relayed(state, binary, tool_args)
         return
@@ -1348,14 +1359,6 @@ def launch(
             model_name=_maybe_add_1m_suffix,
         )
         return
-    if (
-        workspace
-        and os.environ.get(GATEWAY_MODEL_DISCOVERY_ENV_VAR) == "1"
-        and not _has_provider_launch(state)
-    ):
-        # Discovery is launch-scoped. Pass it in the process environment rather
-        # than persisting it in Claude's private or OS-managed settings.
-        os.environ["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1"
     if workspace:
         os.environ["OAUTH_TOKEN"] = get_databricks_token(workspace, state.get("profile"))
     if options.claude_launch_model:

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import os
 import re
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
@@ -22,11 +24,25 @@ from ucode.config_io import (
     ToolSpec,
     backup_existing_file,
     deep_merge_dict,
+    prune_key_paths,
     read_toml_safe,
+    write_json_file,
     write_toml_file,
 )
-from ucode.custom_oauth import CustomOAuthConfig, build_custom_auth_token_argv
+from ucode.constants import (
+    MODEL_PROVIDER_SERVICE_HEADER,
+    MODEL_SERVICE_PARENT_SCHEMA_HEADER,
+)
+from ucode.custom_oauth import (
+    CUSTOM_OAUTH_TIMEOUT_MS,
+    CustomOAuthConfig,
+    build_custom_auth_token_argv,
+    get_custom_client_token,
+)
 from ucode.databricks import (
+    CodexCatalogSource,
+    CodexMpsModelCatalogUnavailable,
+    _fetch_codex_model_catalog,
     build_auth_token_argv,
     build_tool_base_url,
     get_databricks_token,
@@ -50,7 +66,7 @@ from ucode.smart_routing.codex_hooks import (
     sync_smart_routing_hooks,
 )
 from ucode.smart_routing.codex_routing import codex_model_id
-from ucode.state import mark_tool_managed, save_state
+from ucode.state import get_provider_service, is_tool_managed, mark_tool_managed, save_state
 from ucode.telemetry import agent_version, ucode_version
 from ucode.ui import print_warning_err
 
@@ -60,9 +76,20 @@ CODEX_CONFIG_DIR = Path.home() / ".codex"
 CODEX_PROFILE_NAME = "ucode"
 CODEX_CONFIG_PATH = CODEX_CONFIG_DIR / f"{CODEX_PROFILE_NAME}.config.toml"
 CODEX_BACKUP_PATH = APP_DIR / "codex-ucode-config.backup.toml"
+CODEX_MODEL_CATALOG_PATH = APP_DIR / "codex-model-catalog.json"
 LEGACY_CODEX_CONFIG_PATH = CODEX_CONFIG_DIR / "config.toml"
 LEGACY_CODEX_BACKUP_PATH = APP_DIR / "codex-config.backup.toml"
-CODEX_MODEL_PROVIDER_NAME = "ucode-databricks"
+CODEX_MODEL_PROVIDER_NAME = "Databricks"
+LEGACY_CODEX_MODEL_PROVIDER_NAME = "ucode-databricks"
+_MODEL_SERVICE_ROUTING_KEY_PATHS = [
+    ["model_providers", CODEX_MODEL_PROVIDER_NAME, "http_headers", MODEL_PROVIDER_SERVICE_HEADER],
+    [
+        "model_providers",
+        CODEX_MODEL_PROVIDER_NAME,
+        "http_headers",
+        MODEL_SERVICE_PARENT_SCHEMA_HEADER,
+    ],
+]
 MINIMUM_CODEX_VERSION = (0, 134, 0)
 MINIMUM_CODEX_VERSION_TEXT = "0.134.0"
 MINIMUM_ROUTING_CODEX_VERSION = (0, 145, 0)
@@ -151,6 +178,7 @@ def _provider_block(
     databricks_profile: str | None,
     use_pat: bool = False,
     provider: str | None = None,
+    parent_schema: str | None = None,
     custom_oauth: CustomOAuthConfig | None = None,
 ) -> dict:
     if custom_oauth:
@@ -161,10 +189,10 @@ def _provider_block(
     http_headers = {
         "User-Agent": f"ucode/{ucode_version()} codex/{agent_version('codex')}",
     }
-    # Route to an external Model Provider Service; the gateway selects the
-    # provider from this header on every request.
     if provider:
-        http_headers["Databricks-Model-Provider-Service"] = provider
+        http_headers[MODEL_PROVIDER_SERVICE_HEADER] = provider
+    elif parent_schema:
+        http_headers[MODEL_SERVICE_PARENT_SCHEMA_HEADER] = parent_schema
     return {
         "name": "Databricks AI Gateway",
         "base_url": base_url,
@@ -175,7 +203,7 @@ def _provider_block(
         "auth": {
             "command": auth_argv[0],
             "args": auth_argv[1:],
-            "timeout_ms": 5000,
+            "timeout_ms": CUSTOM_OAUTH_TIMEOUT_MS if custom_oauth else 5000,
             "refresh_interval_ms": 900000,
         },
     }
@@ -187,6 +215,7 @@ def render_overlay(
     databricks_profile: str | None = None,
     use_pat: bool = False,
     provider: str | None = None,
+    parent_schema: str | None = None,
     custom_oauth: CustomOAuthConfig | None = None,
 ) -> dict:
     overlay: dict = {"model_provider": CODEX_MODEL_PROVIDER_NAME}
@@ -194,7 +223,12 @@ def render_overlay(
         overlay["model"] = model
     overlay["model_providers"] = {
         CODEX_MODEL_PROVIDER_NAME: _provider_block(
-            workspace, databricks_profile, use_pat, provider, custom_oauth
+            workspace,
+            databricks_profile,
+            use_pat=use_pat,
+            provider=provider,
+            parent_schema=parent_schema,
+            custom_oauth=custom_oauth,
         ),
     }
     return overlay
@@ -206,12 +240,13 @@ def render_legacy_overlay(
     databricks_profile: str | None = None,
     use_pat: bool = False,
     provider: str | None = None,
+    parent_schema: str | None = None,
     custom_oauth: CustomOAuthConfig | None = None,
 ) -> dict:
     """Overlay for Codex CLI < 0.134.0, which only reads `~/.codex/config.toml`.
 
     The shared file uses `profile = "ucode"` to select `[profiles.ucode]`, which
-    points at the shared `[model_providers.ucode-databricks]` block.
+    points at the shared `[model_providers.Databricks]` block.
     """
     profile_block: dict = {"model_provider": CODEX_MODEL_PROVIDER_NAME}
     if model:
@@ -221,7 +256,12 @@ def render_legacy_overlay(
         "profiles": {CODEX_PROFILE_NAME: profile_block},
         "model_providers": {
             CODEX_MODEL_PROVIDER_NAME: _provider_block(
-                workspace, databricks_profile, use_pat, provider, custom_oauth
+                workspace,
+                databricks_profile,
+                use_pat=use_pat,
+                provider=provider,
+                parent_schema=parent_schema,
+                custom_oauth=custom_oauth,
             ),
         },
     }
@@ -241,7 +281,7 @@ def _has_legacy_ucode_entries(doc: dict) -> bool:
     return (
         doc.get("profile") == CODEX_PROFILE_NAME
         or (isinstance(profiles, dict) and CODEX_PROFILE_NAME in profiles)
-        or (isinstance(providers, dict) and CODEX_MODEL_PROVIDER_NAME in providers)
+        or (isinstance(providers, dict) and LEGACY_CODEX_MODEL_PROVIDER_NAME in providers)
     )
 
 
@@ -274,8 +314,8 @@ def _strip_legacy_ucode_entries(path: Path) -> bool:
         changed = True
 
     providers = doc.get("model_providers")
-    if isinstance(providers, dict) and CODEX_MODEL_PROVIDER_NAME in providers:
-        providers.pop(CODEX_MODEL_PROVIDER_NAME, None)
+    if isinstance(providers, dict) and LEGACY_CODEX_MODEL_PROVIDER_NAME in providers:
+        providers.pop(LEGACY_CODEX_MODEL_PROVIDER_NAME, None)
         if not providers:
             doc.pop("model_providers", None)
         changed = True
@@ -315,7 +355,12 @@ def revert_legacy_shared_config() -> bool:
     return _strip_legacy_ucode_entries(_legacy_config_path())
 
 
-def write_tool_config(state: dict, model: str | None = None, provider: str | None = None) -> dict:
+def write_tool_config(
+    state: dict,
+    model: str | None = None,
+    provider: str | None = None,
+    parent_schema: str | None = None,
+) -> dict:
     workspace = state["workspace"]
     # Leave model selection to Codex. The gateway still receives the configured
     # provider and authentication settings, while Codex uses its own default.
@@ -326,7 +371,7 @@ def write_tool_config(state: dict, model: str | None = None, provider: str | Non
 
     if _use_legacy_layout():
         # Codex < 0.134.0 only reads ~/.codex/config.toml. Write the shared
-        # config with [profiles.ucode] + shared [model_providers.ucode-databricks]
+        # config with [profiles.ucode] + shared [model_providers.Databricks]
         # and skip the per-profile-file cleanup that would normally strip
         # ucode's entry from the shared file.
         backup_existing_file(LEGACY_CODEX_CONFIG_PATH, LEGACY_CODEX_BACKUP_PATH)
@@ -336,9 +381,11 @@ def write_tool_config(state: dict, model: str | None = None, provider: str | Non
             databricks_profile,
             use_pat=bool(state.get("use_pat")),
             provider=provider,
+            parent_schema=parent_schema,
             custom_oauth=state.get("custom_oauth"),
         )
         doc = read_toml_safe(LEGACY_CODEX_CONFIG_PATH)
+        prune_key_paths(doc, _MODEL_SERVICE_ROUTING_KEY_PATHS)
         deep_merge_dict(doc, overlay)
         # deep_merge can't drop keys, so clear model preferences from an earlier run.
         profiles = doc.get("profiles")
@@ -349,28 +396,36 @@ def write_tool_config(state: dict, model: str | None = None, provider: str | Non
         ):
             for key in ("model", "model_reasoning_effort"):
                 profiles[CODEX_PROFILE_NAME].pop(key, None)
+        _set_provider_header(doc, None)
         write_toml_file(LEGACY_CODEX_CONFIG_PATH, doc)
         state = mark_tool_managed(state, "codex", LEGACY_MANAGED_KEYS)
         save_state(state)
         return state
 
     _remove_legacy_ucode_profile()
-    backup_existing_file(CODEX_CONFIG_PATH, CODEX_BACKUP_PATH)
+    # Back up only a file that predates ucode's management of the tool. A
+    # re-configure would otherwise snapshot ucode's own generated file, and
+    # revert would restore that snapshot instead of deleting the file.
+    if not is_tool_managed(state, "codex"):
+        backup_existing_file(CODEX_CONFIG_PATH, CODEX_BACKUP_PATH)
     overlay = render_overlay(
         workspace,
         chosen_model,
         databricks_profile,
         use_pat=bool(state.get("use_pat")),
         provider=provider,
+        parent_schema=parent_schema,
         custom_oauth=state.get("custom_oauth"),
     )
 
     def compose(base: dict) -> dict:
+        prune_key_paths(base, _MODEL_SERVICE_ROUTING_KEY_PATHS)
         deep_merge_dict(base, copy.deepcopy(overlay))
         # deep_merge can't drop keys, so clear model preferences from an earlier run.
         if chosen_model is None and not smart_routing_v2.enabled():
             for key in ("model", "model_reasoning_effort"):
                 base.pop(key, None)
+        _set_provider_header(base, None)
         return base
 
     doc = read_toml_safe(CODEX_CONFIG_PATH)
@@ -525,9 +580,95 @@ def clear_model_preferences(state: dict) -> bool:
             doc.pop(key)
             changed = True
     if changed:
-        backup_existing_file(CODEX_CONFIG_PATH, CODEX_BACKUP_PATH)
+        # Never snapshot ucode's own generated file here; revert would restore
+        # the snapshot instead of deleting the file.
+        if not is_tool_managed(state, "codex"):
+            backup_existing_file(CODEX_CONFIG_PATH, CODEX_BACKUP_PATH)
         write_toml_file(CODEX_CONFIG_PATH, doc)
     return changed
+
+
+def _set_provider_header(config: dict, provider: str | None) -> None:
+    _set_routing_header(config, MODEL_PROVIDER_SERVICE_HEADER, provider)
+
+
+def _set_parent_schema_header(config: dict, parent_schema: str | None) -> None:
+    _set_routing_header(config, MODEL_SERVICE_PARENT_SCHEMA_HEADER, parent_schema)
+
+
+def _set_routing_header(config: dict, header: str, value: str | None) -> None:
+    model_providers = config.get("model_providers")
+    if not isinstance(model_providers, dict):
+        return
+    provider_block = model_providers.get(CODEX_MODEL_PROVIDER_NAME)
+    if not isinstance(provider_block, dict):
+        return
+    headers = provider_block.get("http_headers")
+    if not isinstance(headers, dict):
+        provider_block["http_headers"] = {}
+        headers = provider_block["http_headers"]
+    if value:
+        headers[header] = value
+    else:
+        headers.pop(header, None)
+
+
+def _model_catalog_path(workspace: str, scope: str) -> Path:
+    key = f"{workspace.rstrip('/')}\0{scope}".encode()
+    digest = hashlib.sha256(key).hexdigest()[:16]
+    base = CODEX_MODEL_CATALOG_PATH
+    return base.with_name(f"{base.stem}-{digest}{base.suffix}")
+
+
+def _write_model_catalog(path: Path, catalog: dict) -> None:
+    temp_path = None
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd, raw_temp_path = tempfile.mkstemp(
+            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+        )
+        os.close(fd)
+        temp_path = Path(raw_temp_path)
+        write_json_file(temp_path, catalog)
+        os.replace(temp_path, path)
+    except OSError as exc:
+        raise RuntimeError(f"Could not write Codex model catalog at {path}.") from exc
+    finally:
+        if temp_path is not None:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _launch_token(state: dict, workspace: str) -> str:
+    custom_oauth = state.get("custom_oauth")
+    if isinstance(custom_oauth, dict):
+        return get_custom_client_token(
+            workspace,
+            custom_oauth["client_id"],
+            custom_oauth["redirect_url"],
+            scopes=custom_oauth["scopes"],
+        )
+    return get_databricks_token(workspace, state.get("profile"))
+
+
+def _reject_managed_model_catalog() -> None:
+    path = codex_managed_config_path()
+    if path is None:
+        return
+    text = read_managed_file(path)
+    if text is None:
+        return
+    try:
+        managed = _parse_managed_config(text)
+    except RuntimeError as exc:
+        raise RuntimeError(f"Cannot read Codex managed settings at {path}: {exc}") from exc
+    if "model_catalog_json" in managed:
+        raise RuntimeError(
+            f"Codex managed settings at {path} define model_catalog_json, which overrides "
+            "model discovery. Remove it or contact your administrator."
+        )
 
 
 def launch(
@@ -542,8 +683,24 @@ def launch(
     clear_model_preferences(state)
     binary = SPEC["binary"]
     workspace = state.get("workspace")
+    launch_provider = state.get("_codex_launch_provider")
+    provider = (
+        launch_provider.strip()
+        if isinstance(launch_provider, str) and launch_provider.strip()
+        else get_provider_service(state, "codex")
+    )
+    launch_parent_schema = state.get("_codex_launch_parent_schema")
+    parent_schema = (
+        launch_parent_schema.strip()
+        if isinstance(launch_parent_schema, str) and launch_parent_schema.strip()
+        else None
+    )
+    if workspace and (provider or parent_schema):
+        _reject_managed_model_catalog()
+    token = None
     if workspace:
-        os.environ["OAUTH_TOKEN"] = get_databricks_token(workspace, state.get("profile"))
+        token = _launch_token(state, workspace)
+        os.environ["OAUTH_TOKEN"] = token
     if _use_legacy_layout():
         print_warning_err(
             f"Codex {agent_version(binary)} is outdated. Upgrade Codex to "
@@ -562,6 +719,32 @@ def launch(
             f"Cannot launch Codex with the ucode profile because {CODEX_CONFIG_PATH} "
             "is missing or empty. Run `ucode configure --agents codex` first."
         )
+    _set_provider_header(profile_doc, provider)
+    _set_parent_schema_header(profile_doc, parent_schema if not provider else None)
+    if workspace and token and (provider or parent_schema):
+        try:
+            if provider is not None:
+                catalog_source = CodexCatalogSource.PROVIDER
+                catalog_identifier = provider
+                catalog_scope = f"provider:{provider}"
+            elif parent_schema is not None:
+                catalog_source = CodexCatalogSource.PARENT_SCHEMA
+                catalog_identifier = parent_schema
+                catalog_scope = f"parent:{parent_schema}"
+            else:
+                raise RuntimeError("Codex model discovery requires a provider or parent schema.")
+            catalog = _fetch_codex_model_catalog(
+                workspace,
+                token,
+                source=catalog_source,
+                identifier=catalog_identifier,
+            )
+        except CodexMpsModelCatalogUnavailable:
+            pass
+        else:
+            catalog_path = _model_catalog_path(workspace, catalog_scope)
+            _write_model_catalog(catalog_path, catalog)
+            profile_doc["model_catalog_json"] = str(catalog_path)
     exec_or_spawn([binary, *codex_config_args(profile_doc), *tool_args])
 
 
