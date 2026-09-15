@@ -1,30 +1,15 @@
 """Claude Desktop / Cowork launcher: route the GUI through Databricks AI Gateway.
 
-Claude Code is a CLI ucode spawns, so its refresh proxy lives exactly as long as
-the child process. Claude Desktop (and its Cowork mode) is a standalone GUI ucode
-cannot parent, and its gateway config is a static file. Writing tokens into that
-file would leave them to go stale — the Databricks OAuth token expires in ~1h. So
-`ug claude-desktop` keeps the same refresh-proxy model that `ug claude` uses:
+Unlike Claude Code (a CLI ug spawns, whose lifetime bounds the refresh proxy),
+Claude Desktop is a standalone GUI with a static config file — so a token written
+into that file would go stale (the Databricks OAuth token expires in ~1h). Instead
+ug runs the same refresh proxy `ug claude` uses and points a token-less Desktop
+config at it; the proxy owns the upstream auth (live-refreshed Databricks swap
+credential + the fixed Anthropic Authorization + Model-Provider-Service header).
 
-  1. Establish both auth sessions — the Databricks OAuth session (so the proxy can
-     mint swap credentials) and the Anthropic subscription OAuth (via
-     `claude setup-token`, whose long-lived token the proxy relays).
-  2. Start the loopback refresh proxy. It live-refreshes the Databricks credential
-     into the `X-Databricks-AI-Gateway-Token` swap header and stamps the fixed
-     Anthropic `Authorization` + the `Databricks-Model-Provider-Service` routing
-     header on every request. The Desktop client's own credential/auth-scheme is
-     irrelevant: the proxy drops it and owns the upstream auth.
-  3. Write a Claude Desktop gateway config pointing at that proxy (holding NO real
-     tokens, only a loopback URL) and register it in ``configLibrary/_meta.json`` as
-     an entry and the applied config — a file alone is invisible to Desktop. The
-     prior applied config is restored on exit.
-  4. Stay in the foreground to keep the proxy alive while Desktop is used.
-
-EXPERIMENTAL. The Desktop gateway-config schema (the Claude-3p ``configLibrary``
-entry + ``_meta.json`` registry) is not a public contract; the keys written here
-mirror what Desktop authors and may drift across releases. ``modelDiscoveryEnabled``
-is false and models are listed explicitly, because the relayed ``GET /v1/models``
-probe is not served until the companion gateway route change ships.
+EXPERIMENTAL. The Desktop config schema (the Claude-3p ``configLibrary`` entry +
+``_meta.json`` registry) is not a public contract; the keys here mirror what Desktop
+authors and may drift across releases.
 """
 
 from __future__ import annotations
@@ -45,30 +30,20 @@ from ucode.managed_files import OS, current_os
 from ucode.telemetry import agent_version, ucode_version
 from ucode.ui import print_note, print_success, print_warning
 
-# The Anthropic subscription OAuth, when generated headlessly. `claude setup-token`
-# mints a long-lived (~1yr) token and prints it; we also accept it pre-supplied via
-# this env var (the same one Claude Code reads) to skip the browser flow in CI.
 CLAUDE_CODE_OAUTH_TOKEN_ENV_VAR = "CLAUDE_CODE_OAUTH_TOKEN"
-# Anthropic OAuth tokens are `sk-ant-oat…`; match defensively so we can pull the
-# token out of `claude setup-token` output regardless of surrounding prose.
+# Scanned out of `claude setup-token` output, which wraps the token in prose.
 _OAUTH_TOKEN_RE = re.compile(r"sk-ant-[A-Za-z0-9._\-]+")
-# Client auth headers Desktop may send with its (now-unused) configured key. The
-# proxy owns the upstream auth, so drop them: a stray `x-api-key` carrying the
-# OAuth would be rejected by Anthropic alongside the injected `Authorization`.
+# Dropped before forwarding: the proxy owns the upstream auth, and a client
+# `x-api-key` carrying the OAuth would be rejected by Anthropic.
 _STRIP_CLIENT_AUTH_HEADERS = frozenset({"x-api-key", "authorization"})
-# Placeholder written as the Desktop config's key. The proxy overwrites
-# `Authorization` and drops `x-api-key`, so no real credential lives on disk.
+# The proxy overwrites auth, so no real credential ever hits the config file.
 _CONFIG_KEY_PLACEHOLDER = "ug-refresh-proxy-injects-credentials"
-# Desktop's registry file inside configLibrary/: `{appliedId, entries: [{id, name}]}`.
-# A config file is invisible to Desktop until it is listed in `entries`, and inactive
-# until it is the `appliedId`. ug registers its entry and applies it, then restores the
-# prior appliedId on exit so Desktop doesn't stay pinned to a dead-proxy config.
+# In Desktop's registry an entry is invisible until listed in `entries` and inactive
+# until it is the `appliedId`.
 _META_FILENAME = "_meta.json"
 _ENTRY_NAME = "Unity Gateway"
-# Desktop writes its own configLibrary files mode 0600; match that.
-_CONFIG_FILE_MODE = 0o600
-# Claude Desktop's macOS bundle id (stable across renames/locations, unlike the app name).
-_APP_BUNDLE_ID = "com.anthropic.claudefordesktop"
+_CONFIG_FILE_MODE = 0o600  # match Desktop's own configLibrary files
+_APP_BUNDLE_ID = "com.anthropic.claudefordesktop"  # stable across app rename/move
 
 
 def _app_support_dir() -> Path:
@@ -203,8 +178,7 @@ def relaunch_desktop_app() -> None:
             subprocess.run(
                 ["osascript", "-e", f'quit app id "{_APP_BUNDLE_ID}"'], check=False, timeout=30
             )
-            # Wait (bounded) for it to actually exit before relaunching.
-            for _ in range(40):
+            for _ in range(40):  # wait for exit before relaunching
                 if not _macos_app_is_running():
                     break
                 time.sleep(0.25)
@@ -283,8 +257,7 @@ def _ensure_databricks_session(workspace: str, profile: str | None) -> None:
         get_databricks_token(workspace, profile)
         return
     except (RuntimeError, FileNotFoundError):
-        # RuntimeError: no/expired session. FileNotFoundError: the CLI vanished
-        # between the which() check and the call. Either way, try an explicit login.
+        # No/expired session (or the CLI vanished after the which() check) — log in.
         pass
     print_note(f"Launching Databricks sign-in for {workspace}...")
     cmd = ["databricks", "auth", "login", "--host", workspace]
@@ -298,8 +271,7 @@ def _ensure_databricks_session(workspace: str, profile: str | None) -> None:
         raise RuntimeError(f"`databricks auth login` failed for {workspace}.") from exc
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError("`databricks auth login` timed out.") from exc
-    # Confirm the session now mints a token, so a stale/half-finished login
-    # surfaces here rather than as a silent proxy 401 later.
+    # Surface a half-finished login now, not as a silent proxy 401 later.
     get_databricks_token(workspace, profile)
 
 
@@ -327,7 +299,7 @@ def launch(
     server, cache, client = gateway_proxy.start_proxy(
         workspace,
         profile,
-        port=0,  # let the OS assign a free loopback port; the config uses the bound one
+        port=0,  # OS picks a free port
         token_header=gateway_proxy.AI_GATEWAY_TOKEN_HEADER,
         force_refresh_near_expiry=False,
         extra_headers=extra_headers,
@@ -341,8 +313,7 @@ def launch(
     backup_existing_file(path, path.with_suffix(".json.ug-backup"))
     write_json_file(path, render_config(base_url, models or []))
     os.chmod(path, _CONFIG_FILE_MODE)
-    # Register + activate the entry (a file alone is invisible to Desktop); remember
-    # the prior applied config so we can hand it back when the proxy stops.
+    # A bare file is invisible to Desktop until registered + applied; keep the prior.
     prior_applied = register_active_config(config_entry_id(workspace))
 
     print_success(f"Gateway refresh proxy running at {base_url}")
@@ -356,10 +327,8 @@ def launch(
         )
     print_note("Keep this command running while you use Desktop; closing it stops the proxy.")
     try:
-        # Serve on the main thread until Ctrl-C. serve_forever() blocks in select()
-        # and unwinds only via shutdown() or the KeyboardInterrupt SIGINT raises — it
-        # does NOT wake on unrelated signals (SIGCHLD/SIGPIPE/SIGWINCH), unlike
-        # signal.pause(), which would otherwise drop the proxy on the first inference.
+        # serve_forever() unwinds only on shutdown()/KeyboardInterrupt, not on stray
+        # signals — signal.pause() here dropped the proxy on the first inference's SIGCHLD.
         server.serve_forever()
     except KeyboardInterrupt:
         pass
@@ -367,8 +336,7 @@ def launch(
         cache.stop()
         server.shutdown()
         client.close()
-        # Hand the applied config back so Desktop's next restart doesn't boot into
-        # this now-dead loopback proxy.
+        # Don't leave Desktop pinned to the now-dead proxy.
         restore_active_config(prior_applied)
         print_warning(
             "Gateway refresh proxy stopped; Claude Desktop can no longer reach the gateway. "
