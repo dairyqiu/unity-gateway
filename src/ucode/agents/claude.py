@@ -168,12 +168,15 @@ CLAUDE_OTEL_TRACE_ENV_KEYS = (
     "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
     "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
     "CLAUDE_CODE_OTEL_HEADERS_HELPER_DEBOUNCE_MS",
+    "CLAUDE_CODE_PROPAGATE_TRACEPARENT",
 )
 
 
 def _otel_trace_env(workspace: str) -> dict[str, str]:
     # Spans need the ENHANCED_TELEMETRY_BETA gate on top of ENABLE_TELEMETRY (enable alone
     # emits only metrics/events). HTTP needs the full /v1/traces path; auth via otelHeadersHelper.
+    # PROPAGATE_TRACEPARENT emits W3C traceparent on gateway-bound requests (custom base URL)
+    # so the gateway links its server span to Claude's client span.
     return {
         "CLAUDE_CODE_ENABLE_TELEMETRY": "1",
         "CLAUDE_CODE_ENHANCED_TELEMETRY_BETA": "1",
@@ -181,6 +184,7 @@ def _otel_trace_env(workspace: str) -> dict[str, str]:
         "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/protobuf",
         "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": build_otel_traces_endpoint(workspace),
         "CLAUDE_CODE_OTEL_HEADERS_HELPER_DEBOUNCE_MS": "900000",
+        "CLAUDE_CODE_PROPAGATE_TRACEPARENT": "1",
     }
 
 
