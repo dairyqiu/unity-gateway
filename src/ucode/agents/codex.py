@@ -438,6 +438,7 @@ def write_tool_config(
         parent_schema=parent_schema,
         custom_oauth=state.get("custom_oauth"),
     )
+
     def compose(base: dict, *, include_catalog: bool = True) -> dict:
         prune_key_paths(base, _MODEL_SERVICE_ROUTING_KEY_PATHS)
         deep_merge_dict(base, copy.deepcopy(overlay))
