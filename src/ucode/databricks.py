@@ -16,7 +16,7 @@ import shlex
 import shutil
 import subprocess
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from concurrent.futures import (
     ThreadPoolExecutor,
     as_completed,
@@ -3042,6 +3042,31 @@ def _fetch_codex_model_catalog(
     if not payload["models"]:
         raise RuntimeError(f"{kind} {identifier} returned no Codex models.")
     return payload
+
+
+def extra_custom_headers(
+    custom_headers: dict[str, str] | None, reserved_names: Iterable[str]
+) -> list[tuple[str, str]]:
+    """Admin custom headers to add to an outbound gateway request.
+
+    Drops any whose name collides case-insensitively with a ucode-managed header in
+    ``reserved_names`` so ucode's fixed headers always win. Also drops any header whose NAME or
+    VALUE contains newline/carriage-return or whose NAME contains ':' to prevent delimiter
+    injection attacks (Claude uses newline delimiters, Gemini uses commas, and ':' is universal).
+    Returns ``(name, value)`` pairs in the order the admin authored them; each agent formats them
+    for its own config shape.
+    """
+    if not custom_headers:
+        return []
+    reserved = {name.lower() for name in reserved_names}
+    result: list[tuple[str, str]] = []
+    for name, value in custom_headers.items():
+        if name.lower() in reserved:
+            continue
+        if "\n" in name or "\r" in name or ":" in name or "\n" in value or "\r" in value:
+            continue
+        result.append((name, value))
+    return result
 
 
 def build_opencode_base_urls(workspace: str) -> dict[str, str]:
