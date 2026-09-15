@@ -1075,7 +1075,7 @@ class TestSkillDownloadPicker:
 
         message = sd._skills_download_background_loader(WS, "token", roots)(lambda choices: None)
 
-        assert message == "⚠ Timed out after 30s, found 2 skills"
+        assert message == "⚠️ Timed out after 30s, found 2 skills"
 
     def test_prompt_returns_selected_fqns(self, tmp_path, monkeypatch):
         roots = skill_dir_roots(str(tmp_path))

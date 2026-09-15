@@ -597,7 +597,7 @@ def _skills_download_background_loader(
 
         found, reason = list_all_skills(workspace, token, on_skills=on_skills)
         if reason == _SKILLS_WALK_TIMEOUT_REASON:
-            return f"⚠ Timed out after {int(_SKILLS_WALK_DEADLINE_SECONDS)}s, found {len(found)} skills"
+            return f"⚠️ Timed out after {int(_SKILLS_WALK_DEADLINE_SECONDS)}s, found {len(found)} skills"
         return None
 
     return loader
