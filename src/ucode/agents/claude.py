@@ -412,8 +412,13 @@ def render_overlay(
     ]
     if provider:
         header_lines.append(f"{MODEL_PROVIDER_SERVICE_HEADER}: {provider}")
-    elif parent_schema:
-        header_lines.append(f"{MODEL_SERVICE_PARENT_SCHEMA_HEADER}: {parent_schema}")
+    elif parent_schema or model_service_location:
+        # A managed unity_catalog_location (model_service_location) scopes gateway model discovery
+        # to that schema, exactly like an explicit `--parent`; without this header discovery runs
+        # unscoped and the location's models never appear.
+        header_lines.append(
+            f"{MODEL_SERVICE_PARENT_SCHEMA_HEADER}: {parent_schema or model_service_location}"
+        )
     # Append managed headers, but don't override ucode's fixed headers.
     reserved_names = [line.split(": ", 1)[0] for line in header_lines]
     for name, value in extra_custom_headers(custom_headers, reserved_names):

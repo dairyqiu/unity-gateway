@@ -178,6 +178,14 @@ class TestRenderOverlay:
         overlay, _ = claude.render_overlay(WS, "s4")
         assert "x-databricks-use-coding-agent-mode" in overlay["env"]["ANTHROPIC_CUSTOM_HEADERS"]
 
+    def test_managed_location_scopes_discovery_via_parent_header(self):
+        # A managed unity_catalog_location must scope gateway discovery to that schema (like
+        # --parent), not merely enable unscoped discovery, or its models never appear.
+        overlay, _ = claude.render_overlay(WS, "s4", model_service_location="main.default")
+        headers = overlay["env"]["ANTHROPIC_CUSTOM_HEADERS"]
+        assert "Databricks-Model-Service-Parent-Schema: main.default" in headers
+        assert overlay["env"]["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] == "1"
+
     def test_does_not_disable_experimental_betas(self):
         # Would suppress the beta header 1h prompt caching needs.
         overlay, _ = claude.render_overlay(WS, "s4")
