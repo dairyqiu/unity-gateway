@@ -865,6 +865,11 @@ def configure_workspace_command(
     else:
         state = configure_selected_tools(state, picked)
 
+    # This workspace has no managed config, so unregister any MCP servers a prior managed
+    # workspace registered — otherwise switching workspaces leaves the old registry behind.
+    if not is_dry_run():
+        _configure_managed_mcp_servers(None)
+
     summary_lines = [f"[bold]Workspace:[/bold] [cyan]{state['workspace']}[/cyan]"]
     for tool_name in picked:
         spec = TOOL_SPECS[tool_name]
@@ -1928,13 +1933,16 @@ def _print_budget_panel(recommendation: dict, tool: str, managed: dict | None = 
         console.print(panel)
 
 
-def _configure_managed_mcp_servers(managed: dict) -> None:
+def _configure_managed_mcp_servers(managed: dict | None) -> None:
     """Register the managed config's MCP servers for every enabled MCP-client agent.
 
     Runs during ``ug configure`` after the enabled agents are configured, so a workspace-published
-    server reaches each agent's `/mcp` list without the developer re-adding it. Best-effort: a
-    failure warns and leaves the rest of configure intact.
+    server reaches each agent's `/mcp` list without the developer re-adding it. ``managed`` is None
+    when the (now-current) workspace has no managed config: the reconcile then unregisters any
+    servers a prior managed workspace registered, so switching workspaces resets the MCP registry.
+    Best-effort: a failure warns and leaves the rest of configure intact.
     """
+    managed = managed or {}
     agents = {tool for tool in managed_enabled_tools(managed) if tool in MCP_CLIENTS}
     try:
         registered = reconcile_managed_mcp_servers(managed, agents)
