@@ -1496,7 +1496,7 @@ class TestClaudeLaunch:
         claude.launch(
             {"workspace": WS, "profile": "test"},
             [],
-            options=LaunchOptions(claude_launch_model="cat.schema.model"),
+            options=LaunchOptions(user_specified_model="cat.schema.model"),
         )
 
         assert os.environ["ANTHROPIC_MODEL"] == "cat.schema.model"

@@ -1979,13 +1979,12 @@ def _launch_options(
     smart_routing_enabled: bool,
     explicit_prompt: bool,
     user_specified_model: str | None,
+    managed_default_model: str | None,
     provider: str | None,
-    config_or_user_specified_model: str | None = None,
 ) -> LaunchOptions:
     return LaunchOptions(
-        claude_launch_model=(config_or_user_specified_model or user_specified_model)
-        if tool == "claude" and provider is None
-        else None,
+        user_specified_model=user_specified_model if provider is None else None,
+        managed_default_model=managed_default_model if provider is None else None,
         launch_smart_routing=(
             # Smart routing is enabled globally.
             smart_routing_enabled
@@ -2198,6 +2197,7 @@ def _launch_tool(
         # The router's per-launch pick for the root session. Codex pins it as the
         # resolved model; claude pins it via ANTHROPIC_MODEL (route_root_model).
         route_root_model = None
+        managed_model = None
         relayed_forward_model = None  # forwarded to Claude Code's --model for a relayed provider
         if provider:
             # Routing through a Model Provider Service pins no Databricks model;
@@ -2292,13 +2292,6 @@ def _launch_tool(
             _register_managed_mcp_servers(managed, tool, state)
             _download_managed_skills(managed, state)
         if tool == "claude":
-            if smart_routing_enabled:
-                # Transient launch precedence for the v2 PTY's initial --model flag.
-                # An explicit choice wins, followed by a routed/managed root pick;
-                # neither value is persisted into workspace state.
-                launch_model = model or route_root_model
-                if launch_model:
-                    state["_claude_launch_model"] = launch_model
             if provider:
                 state["_claude_launch_provider"] = provider
         elif tool == "codex":
@@ -2312,12 +2305,10 @@ def _launch_tool(
             smart_routing_enabled=smart_routing_enabled,
             explicit_prompt=explicit_prompt,
             # Only a developer's explicit model disables routing. A managed default is the
-            # initial/fallback model and still participates in a routed Claude session.
-            user_specified_model=model,
+            # initial/fallback model and still participates in a routed session.
+            user_specified_model=model or forwarded_model,
+            managed_default_model=managed_model if provider is None else None,
             provider=provider,
-            config_or_user_specified_model=(
-                model or (route_root_model if tool == "claude" else None)
-            ),
         )
         print_success(f"Starting {TOOL_SPECS[tool]['display']}")
         with _managed_smart_routing_environment(managed, tool):
