@@ -14,8 +14,9 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
-from typing import cast
+from typing import BinaryIO, cast
 
 from ucode import gateway_proxy
 from ucode.config_io import (
@@ -85,6 +86,11 @@ CLAUDE_BACKUP_PATH = APP_DIR / "claude-ucode-settings.backup.json"
 WEB_SEARCH_MCP_STATE_KEY = "claude_web_search_mcp"
 MINIMUM_CLAUDE_VERSION = (2, 1, 248)
 MINIMUM_CLAUDE_VERSION_TEXT = "2.1.248"
+_TRANSIENT_DISCOVERY_STATE_KEYS = (
+    "_claude_launch_provider",
+    "_claude_launch_parent_schema",
+    "_claude_scoped_model_discovery",
+)
 
 SPEC: ToolSpec = {
     "binary": "claude",
@@ -330,6 +336,59 @@ def _gateway_models_cache_path() -> Path:
     config_dir = os.environ.get(CLAUDE_CONFIG_DIR_ENV_VAR)
     root = Path(config_dir).expanduser() if config_dir else Path.home() / ".claude"
     return root / "cache" / "gateway-models.json"
+
+
+def _acquire_gateway_models_cache_lock(lock_file: BinaryIO) -> None:
+    if os.name != "nt":
+        import fcntl
+
+        fcntl.flock(lock_file, fcntl.LOCK_EX)
+        # Direct POSIX launches replace ug with Claude. Keeping this descriptor
+        # across exec makes the kernel hold the lock until Claude itself exits.
+        os.set_inheritable(lock_file.fileno(), True)
+        return
+
+    import errno
+    import msvcrt
+
+    # msvcrt locks a byte range and requires that range to exist. The UG parent
+    # waits for the spawned Claude process on Windows, so its descriptor owns the
+    # lock for the full child lifetime.
+    lock_file.seek(0, os.SEEK_END)
+    if lock_file.tell() == 0:
+        lock_file.write(b"\0")
+        lock_file.flush()
+    while True:
+        lock_file.seek(0)
+        try:
+            msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+            return
+        except OSError as exc:
+            if exc.errno not in (errno.EACCES, errno.EAGAIN):
+                raise
+            time.sleep(0.1)
+
+
+@contextmanager
+def _gateway_models_cache_lock():
+    path = _gateway_models_cache_path().with_name(".gateway-models.lock")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lock_file = path.open("a+b")
+        try:
+            _acquire_gateway_models_cache_lock(lock_file)
+        except BaseException:
+            lock_file.close()
+            raise
+    except OSError as exc:
+        raise RuntimeError(f"Could not lock Claude Code's model cache at {path}.") from exc
+    try:
+        yield lock_file.fileno()
+    finally:
+        # Closing releases both POSIX flock and Windows byte-range locks. There
+        # is no stale-lock cleanup: ownership is maintained by the kernel even
+        # though the harmless lock file remains on disk.
+        lock_file.close()
 
 
 def _write_gateway_models_cache(base_url: str, models: list[dict]) -> None:
@@ -1469,7 +1528,10 @@ def _rewrite_relayed_port(state: dict, port: int) -> None:
     a different port than the cached one. Keeps ANTHROPIC_BASE_URL (which Claude
     Code reads) in sync with the live proxy so requests reach it."""
     state["relayed_proxy_port"] = port
-    save_state(state)
+    persisted_state = dict(state)
+    for key in _TRANSIENT_DISCOVERY_STATE_KEYS:
+        persisted_state.pop(key, None)
+    save_state(persisted_state)
     settings = read_json_safe(CLAUDE_SETTINGS_PATH)
     env = settings.get("env")
     if isinstance(env, dict):
@@ -1477,7 +1539,13 @@ def _rewrite_relayed_port(state: dict, port: int) -> None:
         write_json_file(CLAUDE_SETTINGS_PATH, settings)
 
 
-def _launch_relayed(state: dict, binary: str, tool_args: list[str]) -> None:
+def _launch_relayed(
+    state: dict,
+    binary: str,
+    tool_args: list[str],
+    *,
+    cache_lock_fd: int | None = None,
+) -> None:
     """Relayed launch: sign into the Claude subscription, start the loopback
     refresh proxy, then run Claude Code alongside it (the proxy must outlive the
     exec, so we spawn-and-wait rather than replacing the process)."""
@@ -1505,10 +1573,15 @@ def _launch_relayed(state: dict, binary: str, tool_args: list[str]) -> None:
         if os.environ.get(GATEWAY_MODEL_DISCOVERY_ENV_VAR) == "1":
             _prime_gateway_models_cache(state, workspace)
 
+        popen_kwargs = (
+            {"pass_fds": (cache_lock_fd,)} if cache_lock_fd is not None and os.name != "nt" else {}
+        )
+        proc = subprocess.Popen(_build_claude_argv(binary, tool_args, relayed=True), **popen_kwargs)
+        # The bound socket is already listening, so Claude may connect while the
+        # serving thread starts. Creating the child first keeps Popen failures on
+        # the no-thread cleanup path and avoids BaseServer.shutdown deadlocks.
         server_thread = threading.Thread(target=server.serve_forever, daemon=True)
         server_thread.start()
-
-        proc = subprocess.Popen(_build_claude_argv(binary, tool_args, relayed=True))
         try:
             returncode = proc.wait()
         except KeyboardInterrupt:
@@ -1546,36 +1619,38 @@ def launch(
         # Discovery is launch-scoped. Pass it in the process environment rather
         # than persisting it in Claude's private or OS-managed settings.
         os.environ["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1"
-    if state.get("claude_relayed"):
-        _launch_relayed(state, binary, tool_args)
-        return
-    if discovery_enabled:
-        discovery_token = _prime_gateway_models_cache(state, workspace)
-    # Smart routing needs Unix PTY support, which Windows does not provide.
-    if options.launch_smart_routing and os.name == "nt":
-        raise RuntimeError(
-            "Smart routing in Claude Code is currently not supported on Windows. "
-            "Please use Codex or disable smart routing."
-        )
-    if options.launch_smart_routing:
-        smart_routing_v2.launch_claude(
-            state,
-            tool_args,
-            binary=binary,
-            user_settings_path=CLAUDE_USER_SETTINGS_PATH,
-            launch_model=_original_launch_model(state),
-            compose_settings=_compose_v2_settings,
-            launch_model_args=_launch_model_args,
-            model_name=_maybe_add_1m_suffix,
-        )
-        return
-    if workspace:
-        os.environ["OAUTH_TOKEN"] = discovery_token or get_databricks_token(
-            workspace, state.get("profile")
-        )
-    if options.claude_launch_model:
-        os.environ["ANTHROPIC_MODEL"] = options.claude_launch_model
-    exec_or_spawn(_build_claude_argv(binary, tool_args))
+    lock_context = _gateway_models_cache_lock() if discovery_enabled else nullcontext(None)
+    with lock_context as cache_lock_fd:
+        if state.get("claude_relayed"):
+            _launch_relayed(state, binary, tool_args, cache_lock_fd=cache_lock_fd)
+            return
+        if discovery_enabled:
+            discovery_token = _prime_gateway_models_cache(state, workspace)
+        # Smart routing needs Unix PTY support, which Windows does not provide.
+        if options.launch_smart_routing and os.name == "nt":
+            raise RuntimeError(
+                "Smart routing in Claude Code is currently not supported on Windows. "
+                "Please use Codex or disable smart routing."
+            )
+        if options.launch_smart_routing:
+            smart_routing_v2.launch_claude(
+                state,
+                tool_args,
+                binary=binary,
+                user_settings_path=CLAUDE_USER_SETTINGS_PATH,
+                launch_model=_original_launch_model(state),
+                compose_settings=_compose_v2_settings,
+                launch_model_args=_launch_model_args,
+                model_name=_maybe_add_1m_suffix,
+            )
+            return
+        if workspace:
+            os.environ["OAUTH_TOKEN"] = discovery_token or get_databricks_token(
+                workspace, state.get("profile")
+            )
+        if options.claude_launch_model:
+            os.environ["ANTHROPIC_MODEL"] = options.claude_launch_model
+        exec_or_spawn(_build_claude_argv(binary, tool_args))
 
 
 def validate_cmd(binary: str) -> list[str]:

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 import os
 import shlex
 import subprocess
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import MagicMock, Mock
 
@@ -22,6 +24,16 @@ WS = "https://example.databricks.com"
 GH_URL = f"{WS}/api/2.0/mcp/external/github"
 
 
+def _hold_gateway_models_cache_lock(config_dir, scope, attempting, acquired, release) -> None:
+    os.environ[claude.CLAUDE_CONFIG_DIR_ENV_VAR] = config_dir
+    attempting.set()
+    with claude._gateway_models_cache_lock():
+        claude._write_gateway_models_cache(scope, [{"id": scope}])
+        acquired.set()
+        if not release.wait(10):
+            raise RuntimeError("test did not release the gateway-model cache lock")
+
+
 def _proxy_argv() -> list[str]:
     from ucode.databricks import build_mcp_proxy_argv
 
@@ -29,8 +41,9 @@ def _proxy_argv() -> list[str]:
 
 
 @pytest.fixture(autouse=True)
-def _avoid_real_managed_settings(monkeypatch):
+def _avoid_real_managed_settings(monkeypatch, tmp_path):
     monkeypatch.setattr(claude, "_managed_settings_path", lambda: None)
+    monkeypatch.setenv(claude.CLAUDE_CONFIG_DIR_ENV_VAR, str(tmp_path / "claude-config"))
 
 
 class TestClaudeSpec:
@@ -1383,7 +1396,7 @@ class TestClaudeLaunch:
         monkeypatch.setattr(
             claude,
             "_launch_relayed",
-            lambda state, binary, tool_args: calls.append((state, binary, tool_args)),
+            lambda state, binary, tool_args, **_kwargs: calls.append((state, binary, tool_args)),
         )
         monkeypatch.setattr(claude, "_prime_gateway_models_cache", lambda *_args: "token")
         state = {"workspace": WS, "claude_relayed": True}
@@ -1417,7 +1430,7 @@ class TestClaudeLaunch:
                 calls.append(("close",))
 
         class Process:
-            def __init__(self, argv):
+            def __init__(self, argv, **_kwargs):
                 calls.append(("popen", argv))
 
             def wait(self):
@@ -1512,6 +1525,51 @@ class TestClaudeLaunch:
 
         assert calls == ["cache.stop", "server_close", "client.close"]
         popen.assert_not_called()
+
+    def test_relayed_popen_failure_closes_without_server_shutdown(self, monkeypatch):
+        calls: list[str] = []
+
+        class Server:
+            server_address = ("127.0.0.1", 12345)
+
+            def serve_forever(self):
+                calls.append("serve")
+
+            def shutdown(self):
+                raise AssertionError("shutdown would deadlock before serve_forever starts")
+
+            def server_close(self):
+                calls.append("server_close")
+
+        class Cache:
+            def stop(self):
+                calls.append("cache.stop")
+
+        class Client:
+            def close(self):
+                calls.append("client.close")
+
+        monkeypatch.delenv(claude.GATEWAY_MODEL_DISCOVERY_ENV_VAR, raising=False)
+        monkeypatch.setattr(claude, "_ensure_subscription_login", lambda: None)
+        monkeypatch.setattr(
+            claude.gateway_proxy,
+            "start_proxy",
+            lambda *_args, **_kwargs: (Server(), Cache(), Client()),
+        )
+        monkeypatch.setattr(
+            claude.subprocess,
+            "Popen",
+            Mock(side_effect=OSError("could not start Claude")),
+        )
+
+        with pytest.raises(OSError, match="could not start Claude"):
+            claude._launch_relayed(
+                {"workspace": WS, "claude_relayed": True, "relayed_proxy_port": 12345},
+                "claude",
+                [],
+            )
+
+        assert calls == ["cache.stop", "server_close", "client.close"]
 
     def test_smart_routing_on_windows_is_not_supported(self, monkeypatch):
         monkeypatch.setenv(v2.ENV_VAR, "1")
@@ -1637,6 +1695,88 @@ class TestClaudeLaunch:
 
 
 class TestGatewayModelsCache:
+    def test_discovery_lock_covers_refresh_and_launch(self, monkeypatch):
+        events: list[str] = []
+
+        @contextmanager
+        def lock():
+            events.append("lock acquired")
+            yield 123
+            events.append("lock released")
+
+        monkeypatch.setenv(claude.GATEWAY_MODEL_DISCOVERY_ENV_VAR, "1")
+        monkeypatch.setattr(claude, "_gateway_models_cache_lock", lock)
+        monkeypatch.setattr(
+            claude,
+            "_prime_gateway_models_cache",
+            lambda *_args: events.append("cache refreshed") or "token",
+        )
+        monkeypatch.setattr(
+            claude,
+            "exec_or_spawn",
+            lambda _argv: events.append("Claude exited"),
+        )
+
+        claude.launch({"workspace": WS}, [], options=LaunchOptions())
+
+        assert events == [
+            "lock acquired",
+            "cache refreshed",
+            "Claude exited",
+            "lock released",
+        ]
+
+    def test_serializes_concurrent_launch_scopes(self, tmp_path):
+        context = multiprocessing.get_context("spawn")
+        first_attempting = context.Event()
+        first_acquired = context.Event()
+        release_first = context.Event()
+        second_attempting = context.Event()
+        second_acquired = context.Event()
+        release_second = context.Event()
+        config_dir = str(tmp_path / "shared-claude-config")
+        first = context.Process(
+            target=_hold_gateway_models_cache_lock,
+            args=(config_dir, "first-scope", first_attempting, first_acquired, release_first),
+        )
+        second = context.Process(
+            target=_hold_gateway_models_cache_lock,
+            args=(config_dir, "second-scope", second_attempting, second_acquired, release_second),
+        )
+        cache_path = Path(config_dir) / "cache" / "gateway-models.json"
+        try:
+            first.start()
+            assert first_attempting.wait(10)
+            assert first_acquired.wait(10)
+            assert json.loads(cache_path.read_text(encoding="utf-8"))["baseUrl"] == "first-scope"
+            second.start()
+            assert second_attempting.wait(10)
+            assert not second_acquired.wait(0.25)
+            assert json.loads(cache_path.read_text(encoding="utf-8"))["baseUrl"] == "first-scope"
+
+            release_first.set()
+            assert second_acquired.wait(10)
+            assert json.loads(cache_path.read_text(encoding="utf-8"))["baseUrl"] == "second-scope"
+            release_second.set()
+            first.join(10)
+            second.join(10)
+            assert first.exitcode == 0
+            assert second.exitcode == 0
+        finally:
+            release_first.set()
+            release_second.set()
+            for process in (first, second):
+                if process.pid is None:
+                    continue
+                if process.is_alive():
+                    process.terminate()
+                process.join(10)
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX exec uses inheritable flock descriptor")
+    def test_posix_lock_descriptor_is_inheritable(self):
+        with claude._gateway_models_cache_lock() as lock_fd:
+            assert os.get_inheritable(lock_fd) is True
+
     def test_switching_parents_replaces_cached_models(self, tmp_path, monkeypatch):
         config_dir = tmp_path / "custom claude config"
         cache_path = config_dir / "cache" / "gateway-models.json"
@@ -1693,7 +1833,7 @@ class TestGatewayModelsCache:
         config_dir = tmp_path / "claude-config"
         cache_path = config_dir / "cache" / "gateway-models.json"
         saved_states: list[dict] = []
-        launched: list[list[str]] = []
+        launched: list[tuple[list[str], dict]] = []
         caches = []
 
         class Cache:
@@ -1708,8 +1848,8 @@ class TestGatewayModelsCache:
                 self.stopped = True
 
         class Process:
-            def __init__(self, argv):
-                launched.append(argv)
+            def __init__(self, argv, **kwargs):
+                launched.append((argv, kwargs))
 
             def wait(self):
                 return 0
@@ -1742,6 +1882,9 @@ class TestGatewayModelsCache:
             "profile": "test",
             "claude_relayed": True,
             "relayed_proxy_port": busy_port,
+            "_claude_launch_provider": "main.default.anthropic",
+            "_claude_launch_parent_schema": "main.default",
+            "_claude_scoped_model_discovery": True,
         }
 
         try:
@@ -1755,10 +1898,13 @@ class TestGatewayModelsCache:
         expected_base_url = f"http://127.0.0.1:{bound_port}"
         assert bound_port != busy_port
         assert saved_states[-1]["relayed_proxy_port"] == bound_port
+        assert not set(saved_states[-1]) & set(claude._TRANSIENT_DISCOVERY_STATE_KEYS)
         settings = json.loads(settings_path.read_text(encoding="utf-8"))
         assert settings["env"]["ANTHROPIC_BASE_URL"] == expected_base_url
         assert json.loads(cache_path.read_text(encoding="utf-8"))["baseUrl"] == expected_base_url
-        assert str(settings_path) in launched[0]
+        assert str(settings_path) in launched[0][0]
+        assert set(launched[0][1]) == {"pass_fds"}
+        assert len(launched[0][1]["pass_fds"]) == 1
         assert caches and caches[0].stopped is True
 
     def test_failed_refresh_blocks_launch(self, monkeypatch):

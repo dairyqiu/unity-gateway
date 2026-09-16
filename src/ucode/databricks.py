@@ -2686,6 +2686,8 @@ def fetch_anthropic_gateway_models(
     if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
         return None, "AI Gateway returned an invalid Anthropic model catalog"
     models = payload["data"]
+    if not models:
+        return None, "AI Gateway returned no Anthropic models"
     if any(
         not isinstance(model, dict) or not isinstance(model.get("id"), str) or not model["id"]
         for model in models

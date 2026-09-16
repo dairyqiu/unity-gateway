@@ -199,6 +199,18 @@ class TestFetchAnthropicGatewayModels:
         assert models is None
         assert "invalid Anthropic" in reason
 
+    def test_rejects_empty_catalog(self, monkeypatch):
+        monkeypatch.setattr(
+            db_mod,
+            "_http_get_json",
+            lambda *args, **kwargs: ({"data": []}, None),
+        )
+
+        models, reason = db_mod.fetch_anthropic_gateway_models(WS, "tok")
+
+        assert models is None
+        assert reason == "AI Gateway returned no Anthropic models"
+
 
 class TestWorkspaceHostname:
     def test_extracts_hostname(self):
