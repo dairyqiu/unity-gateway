@@ -120,11 +120,13 @@ from ucode.smart_routing.claude_hooks import FIRST_PROMPT_SOCKET_ENV, ROUTE_FIRS
 from ucode.state import (
     STATE_PATH,
     clear_state,
+    get_model_location,
     get_provider_service,
     load_full_state,
     load_state,
     save_state,
     set_current_workspace,
+    set_model_location,
     set_provider_service,
 )
 from ucode.string_utils import is_valid_catalog_schema
@@ -751,6 +753,7 @@ def configure_workspace_command(
     databricks_ai_tools_enabled: bool | None = None,
     custom_oauth: CustomOAuthConfig | None = None,
     offer_optional_setup: bool = False,
+    model_location: str | None = None,
 ) -> int:
     if tool is not None and selected_tools is not None:
         raise RuntimeError("Use either --agent or --agents, not both.")
@@ -758,7 +761,7 @@ def configure_workspace_command(
     # The Databricks-vs-Model-Provider-Service picker is shown only on the fully
     # interactive path (`ug configure` with no --agent/--agents). Naming agents
     # explicitly signals the non-interactive flow, which stays on Databricks.
-    offer_provider = tool is None and selected_tools is None
+    offer_provider = tool is None and selected_tools is None and model_location is None
 
     workspace_entries = workspaces or [_prompt_for_configuration(tool)]
 
@@ -773,7 +776,13 @@ def configure_workspace_command(
             clear_custom_oauth=custom_oauth is None,
         )
         state = states[0]
-        state = configure_single_tool(tool, state)
+        _prepare_model_location(state, [tool], model_location)
+        if model_location is not None and tool in CAN_USE_CACHED_CONFIG_AGENTS:
+            state = _configure_tools_with_model_location(
+                state, [tool], model_location, install_ai_tools=False
+            )
+        else:
+            state = configure_single_tool(tool, state)
         install_databricks_ai_tools_for_agents([tool], state)
         spec = TOOL_SPECS[tool]
         console.print(
@@ -798,7 +807,6 @@ def configure_workspace_command(
         clear_custom_oauth=custom_oauth is None,
     )
     state = states[0]
-    save_state(state)
 
     # A published managed config means the admin dictates the setup: apply it to every enabled agent
     # now rather than prompting the developer to pick.
@@ -820,7 +828,10 @@ def configure_workspace_command(
     tools_to_check = selected_tools or list(TOOL_SPECS)
     for tool_name in tools_to_check:
         with spinner(f"Checking {TOOL_SPECS[tool_name]['display']} availability..."):
-            if check_gateway_endpoint(state, tool_name):
+            location_backed = (
+                model_location is not None and tool_name in CAN_USE_CACHED_CONFIG_AGENTS
+            )
+            if location_backed or check_gateway_endpoint(state, tool_name):
                 available_on_workspace.append(tool_name)
 
     if not available_on_workspace:
@@ -845,6 +856,8 @@ def configure_workspace_command(
         print_note("No coding agents selected — nothing to configure.")
         return 0
 
+    _prepare_model_location(state, picked, model_location)
+
     for tool_name in picked:
         install_tool_binary(
             tool_name,
@@ -857,10 +870,12 @@ def configure_workspace_command(
         for tool_name in picked:
             state = _maybe_select_provider_service(tool_name, state)
 
-    if offer_optional_setup:
-        state = configure_selected_tools(state, picked, install_ai_tools=False)
-    else:
-        state = configure_selected_tools(state, picked)
+    state = _configure_tools_with_model_location(
+        state,
+        picked,
+        model_location,
+        install_ai_tools=not offer_optional_setup,
+    )
 
     summary_lines = [f"[bold]Workspace:[/bold] [cyan]{state['workspace']}[/cyan]"]
     for tool_name in picked:
@@ -880,6 +895,51 @@ def configure_workspace_command(
     if offer_optional_setup and not is_dry_run():
         _configure_optional_setup(state, picked)
     return 0
+
+
+def _prepare_model_location(state: dict, tools: list[str], location: str | None) -> None:
+    """Apply the selected agents' location/provider preferences to in-memory state."""
+    for tool in tools:
+        if tool in CAN_USE_CACHED_CONFIG_AGENTS:
+            set_model_location(state, tool, location)
+            if location is not None:
+                set_provider_service(state, tool, None)
+
+
+def _configure_model_location(state: dict, tools: list[str], location: str | None) -> dict:
+    """Rewrite selected Claude/Codex configs with the persisted model-location scope."""
+    if location is None:
+        return state
+    for tool in tools:
+        state = configure_tool(tool, state, parent_schema=location)
+    return state
+
+
+def _configure_tools_with_model_location(
+    state: dict,
+    tools: list[str],
+    location: str | None,
+    *,
+    install_ai_tools: bool,
+) -> dict:
+    """Configure selected tools, using ``location`` as Claude/Codex's model source."""
+    if location is None:
+        if install_ai_tools:
+            return configure_selected_tools(state, tools)
+        return configure_selected_tools(state, tools, install_ai_tools=False)
+
+    scoped_tools = [tool for tool in tools if tool in CAN_USE_CACHED_CONFIG_AGENTS]
+    regular_tools = [tool for tool in tools if tool not in scoped_tools]
+    if regular_tools:
+        state = configure_selected_tools(state, regular_tools, install_ai_tools=False)
+    if scoped_tools:
+        state = _configure_model_location(state, scoped_tools, location)
+        existing = state.get("available_tools") or []
+        state["available_tools"] = sorted(set(existing) | set(scoped_tools))
+        save_state(state)
+    if install_ai_tools:
+        install_databricks_ai_tools_for_agents(tools, state)
+    return state
 
 
 def status() -> int:
@@ -919,6 +979,9 @@ def status() -> int:
         provider_service = get_provider_service(state, tool)
         if configured and provider_service:
             print_kv("Model Provider Service", provider_service)
+        model_location = get_model_location(state, tool)
+        if configured and model_location:
+            print_kv("Model location", model_location)
         print_kv("Base URL", base_url)
         if configured and tool in MCP_CLIENTS:
             tool_mcp_servers = [
@@ -2086,9 +2149,11 @@ def _launch_tool(
         if _child_owns_stdout(tool, ctx.args):
             redirect_output_to_stderr()
         if provider is not None and parent_schema is not None:
-            raise RuntimeError("--provider and --parent cannot be used together.")
+            raise RuntimeError("--provider and --model-location cannot be used together.")
         if parent_schema is not None and not is_valid_catalog_schema(parent_schema):
-            raise RuntimeError("--parent must be `<catalog>.<schema>`.")
+            raise RuntimeError(
+                "--model-location must be a literal `<catalog>.<schema>` identifier."
+            )
         explicit_prompt = _has_explicit_prompt(ctx)
         smart_routing_enabled = smart_routing_v2.smart_routing_enabled()
         # Launchers such as isaac put their harness arguments after `--`, so the harness's own
@@ -2106,6 +2171,17 @@ def _launch_tool(
         if workspace_url:
             set_current_workspace(normalize_workspace_url(workspace_url))
         existing = load_state()
+        explicit_provider = provider
+        explicit_model_location = parent_schema is not None
+        saved_provider = get_provider_service(existing, tool)
+        saved_model_location = get_model_location(existing, tool)
+        if explicit_model_location:
+            provider = None
+        elif explicit_provider is not None:
+            parent_schema = None
+        else:
+            provider = saved_provider
+            parent_schema = saved_model_location if provider is None else None
         # Workspaces configured with --use-pat export the profile's PAT as
         # DATABRICKS_BEARER up front so every auth check below (and the
         # launched agent itself) uses the static token instead of OAuth.
@@ -2120,12 +2196,8 @@ def _launch_tool(
             else:
                 _auto_configure_tool(tool, custom_oauth=custom_oauth)
         state = ensure_provider_state(tool)
-        # Remembered before the fallback below collapses the two cases: a managed config may not
-        # silently override a provider the user typed on the command line (it errors instead).
-        explicit_provider = provider
-        # An explicit --provider overrides the persisted choice; otherwise fall
-        # back to whatever `ug configure` saved for this tool.
-        provider = provider or get_provider_service(state, tool)
+        # Remembered above before persisted launch preferences were applied: a managed config may
+        # not silently override a provider the user typed on the command line (it errors instead).
         state = _migrate_legacy_smart_routing(state)
         # Fetched before `configure_shared_state` because it decides whether this agent may launch
         # at all and whether the model discovery below can be skipped.
@@ -2152,7 +2224,11 @@ def _launch_tool(
             state["workspace"],
             profile=state.get("profile"),
             tools=[tool],
-            skip_model_discovery=bool(provider) or managed_models_known,
+            skip_model_discovery=(
+                bool(provider)
+                or (bool(parent_schema) and _scoped_model_discovery_enabled())
+                or managed_models_known
+            ),
             skip_preflight=skip_preflight,
             **configure_kwargs,
         )
@@ -2188,8 +2264,11 @@ def _launch_tool(
                 )
             if managed_provider:
                 provider = managed_provider
+            # The workspace-managed source selection outranks the developer's saved/explicit
+            # location. Managed unity_catalog_location support is intentionally out of scope.
+            parent_schema = None
         if provider and parent_schema is not None:
-            raise RuntimeError("--provider and --parent cannot be used together.")
+            raise RuntimeError("--provider and --model-location cannot be used together.")
         scoped_model_source = bool(provider or parent_schema)
         scoped_model_discovery = _scoped_model_discovery_enabled(force=managed_provider is not None)
         # Checked after the managed config settles `provider`: an admin-set provider must trip this
@@ -2264,6 +2343,10 @@ def _launch_tool(
                 resolved_model, gemini_error = resolve_gemini_provider_model(state, provider, model)
                 if gemini_error:
                     raise RuntimeError(gemini_error)
+        elif parent_schema:
+            # The schema is the authoritative model source. Do not resolve or pin a model from
+            # global Hosted discovery; the agent discovers this location through the scoped header.
+            resolved_model = None
         else:
             # A managed default_model is the model the admin wants sessions to start on, so it goes
             # in as the explicit model rather than being applied afterwards: for codex the proto has
@@ -2333,20 +2416,26 @@ def _launch_tool(
         if managed is not None and not is_dry_run():
             _register_managed_mcp_servers(managed, tool, state)
             _download_managed_skills(managed, state)
+        # Launch-scoped choices live on a shallow copy so downstream agent fallbacks cannot revive
+        # a saved provider that an explicit --model-location overrode, and transient markers can
+        # never leak into a later state save.
+        launch_state = dict(state)
+        if explicit_model_location:
+            set_provider_service(launch_state, tool, None)
         if tool == "claude":
             if provider:
-                state["_claude_launch_provider"] = provider
+                launch_state["_claude_launch_provider"] = provider
             elif parent_schema:
-                state["_claude_launch_parent_schema"] = parent_schema
+                launch_state["_claude_launch_parent_schema"] = parent_schema
             if scoped_model_source:
-                state[CLAUDE_SCOPED_MODEL_DISCOVERY_STATE_KEY] = scoped_model_discovery
+                launch_state[CLAUDE_SCOPED_MODEL_DISCOVERY_STATE_KEY] = scoped_model_discovery
         elif tool == "codex":
             if scoped_model_source:
-                state[CODEX_SCOPED_MODEL_DISCOVERY_STATE_KEY] = scoped_model_discovery
+                launch_state[CODEX_SCOPED_MODEL_DISCOVERY_STATE_KEY] = scoped_model_discovery
             if provider:
-                state["_codex_launch_provider"] = provider
+                launch_state["_codex_launch_provider"] = provider
             elif parent_schema:
-                state["_codex_launch_parent_schema"] = parent_schema
+                launch_state["_codex_launch_parent_schema"] = parent_schema
         launch_options = _launch_options(
             tool,
             ctx.args,
@@ -2359,7 +2448,7 @@ def _launch_tool(
         )
         print_success(f"Starting {TOOL_SPECS[tool]['display']}")
         with _managed_smart_routing_environment(managed, tool):
-            launch_agent(tool, state, ctx.args, options=launch_options)
+            launch_agent(tool, launch_state, ctx.args, options=launch_options)
     except RuntimeError as exc:
         print_err(str(exc))
         raise typer.Exit(1) from None
@@ -2542,6 +2631,13 @@ def _scoped_model_discovery_enabled(*, force: bool = False) -> bool:
     return scoped_model_discovery_enabled(force=force)
 
 
+def _resolve_model_location_alias(model_location: str | None, parent: str | None) -> str | None:
+    """Resolve the hidden legacy ``--parent`` spelling without obscuring diagnostics."""
+    if model_location is not None and parent is not None:
+        raise RuntimeError("Use only one of --model-location or --parent.")
+    return model_location if model_location is not None else parent
+
+
 @app.command(
     "codex",
     cls=_PromptAwareCommand,
@@ -2558,12 +2654,17 @@ def codex_cmd(
             "before any `--` separator.",
         ),
     ] = None,
-    parent: Annotated[
+    model_location: Annotated[
         str | None,
         typer.Option(
-            "--parent",
-            help="Discover model services in `<catalog>.<schema>`. Example: main.default",
+            "--model-location",
+            help="Discover models from a literal Unity Catalog `<catalog>.<schema>` location. "
+            "Overrides a saved provider for this launch.",
         ),
+    ] = None,
+    parent: Annotated[
+        str | None,
+        typer.Option("--parent", hidden=True),
     ] = None,
     refresh: Annotated[
         bool,
@@ -2606,6 +2707,7 @@ def codex_cmd(
 ) -> None:
     """Launch Codex via Databricks."""
     try:
+        model_location = _resolve_model_location_alias(model_location, parent)
         custom_oauth = _custom_oauth_config(client_id, redirect_url, scopes)
     except RuntimeError as exc:
         print_err(str(exc))
@@ -2626,7 +2728,7 @@ def codex_cmd(
                 refresh=refresh,
                 skip_preflight=skip_preflight,
                 workspace_url=workspace,
-                parent_schema=parent,
+                parent_schema=model_location,
                 custom_oauth=custom_oauth,
             )
 
@@ -2647,12 +2749,17 @@ def claude_cmd(
             "before any `--` separator.",
         ),
     ] = None,
-    parent: Annotated[
+    model_location: Annotated[
         str | None,
         typer.Option(
-            "--parent",
-            help="Discover model services in `<catalog>.<schema>`. Example: main.default",
+            "--model-location",
+            help="Discover models from a literal Unity Catalog `<catalog>.<schema>` location. "
+            "Overrides a saved provider for this launch.",
         ),
+    ] = None,
+    parent: Annotated[
+        str | None,
+        typer.Option("--parent", hidden=True),
     ] = None,
     model: Annotated[
         str | None,
@@ -2714,6 +2821,7 @@ def claude_cmd(
 ) -> None:
     """Launch Claude Code via Databricks."""
     try:
+        model_location = _resolve_model_location_alias(model_location, parent)
         custom_oauth = _custom_oauth_config(client_id, redirect_url, scopes)
     except RuntimeError as exc:
         print_err(str(exc))
@@ -2728,7 +2836,7 @@ def claude_cmd(
     requested_discovery: bool | None = None
     if enable_model_discovery:
         requested_discovery = True
-    elif provider is not None or parent is not None:
+    elif provider is not None or model_location is not None:
         requested_discovery = _scoped_model_discovery_enabled()
     with claude_agent.launch_discovery_environment(requested_discovery):
         with _smart_routing_v2_flag(enable_smart_routing_flag):
@@ -2741,7 +2849,7 @@ def claude_cmd(
                     refresh=refresh,
                     skip_preflight=skip_preflight,
                     workspace_url=workspace,
-                    parent_schema=parent,
+                    parent_schema=model_location,
                     custom_oauth=custom_oauth,
                 )
 
@@ -2852,6 +2960,14 @@ def configure(
         typer.Option(
             "--agents",
             help="Configure a comma-separated list of agents without prompting (e.g. claude,codex).",
+        ),
+    ] = None,
+    model_location: Annotated[
+        str | None,
+        typer.Option(
+            "--model-location",
+            help="Persist a literal Unity Catalog `<catalog>.<schema>` model location for this "
+            "workspace and selected Claude/Codex agents.",
         ),
     ] = None,
     workspace: Annotated[
@@ -2993,6 +3109,10 @@ def configure(
     set_verbosity(verbose)
     try:
         custom_oauth = _custom_oauth_config(client_id, redirect_url, scopes)
+        if model_location is not None and not is_valid_catalog_schema(model_location):
+            raise RuntimeError(
+                "--model-location must be a literal `<catalog>.<schema>` identifier."
+            )
         if custom_oauth is not None and use_pat:
             raise RuntimeError("--client-id cannot be combined with --use-pat.")
         install_databricks_cli()
@@ -3025,6 +3145,8 @@ def configure(
             skip_kwargs["databricks_ai_tools_enabled"] = enable_databricks_ai_tools
         if custom_oauth is not None:
             skip_kwargs["custom_oauth"] = custom_oauth
+        if model_location is not None:
+            skip_kwargs["model_location"] = model_location
         # Set True only in the fully-interactive branch below; gates the optional
         # MCP setup prompt so flag-driven / scripted runs are never interrupted.
         fully_interactive = False
