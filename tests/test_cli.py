@@ -604,6 +604,21 @@ class TestSubcommandRouting:
 
         assert options.launch_smart_routing is True
 
+    def test_smart_routing_diagnostics_show_all_inputs(self, monkeypatch):
+        monkeypatch.setenv("UCODE_DEBUG", "1")
+        monkeypatch.setenv("ENABLE_SMART_ROUTING_V2", "0")
+        notes = []
+        monkeypatch.setattr(cli_mod, "print_note", notes.append)
+
+        cli_mod._log_smart_routing_diagnostics(
+            "codex", managed_enabled=True, effective_enabled=True
+        )
+
+        assert notes == [
+            "Smart routing debug: agent=codex, managed=True, "
+            "ENABLE_SMART_ROUTING_V2='0', effective=True"
+        ]
+
     @pytest.mark.parametrize(
         ("tool_args", "expected"),
         [

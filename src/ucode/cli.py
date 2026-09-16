@@ -2011,6 +2011,8 @@ def _managed_smart_routing_environment(managed: dict | None, tool: str) -> Itera
     name = "SMART_ROUTING_V2_ENABLED"
     previous = os.environ.get(name)
     os.environ[name] = "1"
+    if os.environ.get("UCODE_DEBUG") == "1":
+        print_note(f"Smart routing debug: child {name}=1 for {tool}")
     try:
         yield
     finally:
@@ -2024,6 +2026,20 @@ def _managed_smart_routing_enabled(managed: dict | None, tool: str) -> bool:
     """Whether the workspace enabled smart routing for this specific agent."""
     agent_config = ((managed or {}).get("enabled_agents") or {}).get(tool) or {}
     return agent_config.get("smart_routing_enabled") is True
+
+
+def _log_smart_routing_diagnostics(
+    tool: str, *, managed_enabled: bool, effective_enabled: bool
+) -> None:
+    """Show launch routing inputs under UCODE_DEBUG without adding normal-launch noise."""
+    if os.environ.get("UCODE_DEBUG") != "1":
+        return
+    environment_value = os.environ.get(smart_routing_v2.ENV_VAR)
+    print_note(
+        "Smart routing debug: "
+        f"agent={tool}, managed={managed_enabled}, "
+        f"{smart_routing_v2.ENV_VAR}={environment_value!r}, effective={effective_enabled}"
+    )
 
 
 def _launch_tool(
@@ -2098,8 +2114,12 @@ def _launch_tool(
         _reject_disabled_agent(managed, tool)
         # The environment switch remains a developer override; managed config is the workspace
         # policy equivalent and must take effect before launch options are computed.
-        smart_routing_enabled = smart_routing_enabled or _managed_smart_routing_enabled(
-            managed, tool
+        managed_smart_routing_enabled = _managed_smart_routing_enabled(managed, tool)
+        smart_routing_enabled = smart_routing_enabled or managed_smart_routing_enabled
+        _log_smart_routing_diagnostics(
+            tool,
+            managed_enabled=managed_smart_routing_enabled,
+            effective_enabled=smart_routing_enabled,
         )
         # Discovery exists to find models and isn't needed for managed config that already names them.
         managed_models_known = managed_supplies_models(managed, tool)
