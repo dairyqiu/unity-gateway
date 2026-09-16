@@ -75,9 +75,9 @@ from .args import LaunchOptions, has_explicit_model_arg
 GATEWAY_MODEL_DISCOVERY_ENV_VAR = "ENABLE_CLAUDE_CODE_GATEWAY_MODEL_DISCOVERY"
 # If set, Claude Code launches in headless mode instead of the interactive login flow.
 CLAUDE_CODE_OAUTH_TOKEN_ENV_VAR = "CLAUDE_CODE_OAUTH_TOKEN"
+CLAUDE_CONFIG_DIR_ENV_VAR = "CLAUDE_CONFIG_DIR"
 CLAUDE_CONFIG_DIR = Path.home() / ".claude"
 CLAUDE_SETTINGS_PATH = CLAUDE_CONFIG_DIR / "ucode-settings.json"
-CLAUDE_GATEWAY_MODELS_CACHE_PATH = CLAUDE_CONFIG_DIR / "cache" / "gateway-models.json"
 CLAUDE_MCP_CONFIG_PATH = Path.home() / ".claude.json"
 # The default model is stored in Claude's default user settings, not the ucode settings.
 CLAUDE_USER_SETTINGS_PATH = CLAUDE_CONFIG_DIR / "settings.json"
@@ -326,8 +326,14 @@ def _launch_token(state: dict, workspace: str) -> str:
     return get_databricks_token(workspace, state.get("profile"))
 
 
+def _gateway_models_cache_path() -> Path:
+    config_dir = os.environ.get(CLAUDE_CONFIG_DIR_ENV_VAR)
+    root = Path(config_dir).expanduser() if config_dir else Path.home() / ".claude"
+    return root / "cache" / "gateway-models.json"
+
+
 def _write_gateway_models_cache(base_url: str, models: list[dict]) -> None:
-    path = CLAUDE_GATEWAY_MODELS_CACHE_PATH
+    path = _gateway_models_cache_path()
     temp_path = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -345,7 +351,7 @@ def _write_gateway_models_cache(base_url: str, models: list[dict]) -> None:
             },
         )
         os.replace(temp_path, path)
-    except OSError as exc:
+    except (OSError, RuntimeError) as exc:
         raise RuntimeError(f"Could not update Claude Code's model cache at {path}.") from exc
     finally:
         if temp_path is not None:
@@ -1488,26 +1494,41 @@ def _launch_relayed(state: dict, binary: str, tool_args: list[str]) -> None:
         token_header=gateway_proxy.AI_GATEWAY_TOKEN_HEADER,
         force_refresh_near_expiry=False,
     )
-    # start_proxy falls back to an OS-assigned port when the cached one is taken
-    # (stale proxy from a killed session). Reconcile settings + state to whatever
-    # it actually bound, so Claude Code connects to the live port.
-    bound_port = server.server_address[1]
-    if bound_port != port:
-        _rewrite_relayed_port(state, bound_port)
-
-    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
-    server_thread.start()
-
-    proc = subprocess.Popen(_build_claude_argv(binary, tool_args, relayed=True))
+    server_thread = None
     try:
-        returncode = proc.wait()
-    except KeyboardInterrupt:
-        proc.send_signal(signal.SIGINT)
-        returncode = proc.wait()
+        # start_proxy falls back to an OS-assigned port when the cached one is taken
+        # (stale proxy from a killed session). Reconcile every port consumer before
+        # priming Claude's gateway-model cache so its baseUrl points at the live proxy.
+        bound_port = server.server_address[1]
+        if bound_port != port:
+            _rewrite_relayed_port(state, bound_port)
+        if os.environ.get(GATEWAY_MODEL_DISCOVERY_ENV_VAR) == "1":
+            _prime_gateway_models_cache(state, workspace)
+
+        server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server_thread.start()
+
+        proc = subprocess.Popen(_build_claude_argv(binary, tool_args, relayed=True))
+        try:
+            returncode = proc.wait()
+        except KeyboardInterrupt:
+            proc.send_signal(signal.SIGINT)
+            returncode = proc.wait()
     finally:
-        cache.stop()
-        server.shutdown()
-        client.close()
+        try:
+            cache.stop()
+        finally:
+            try:
+                if server_thread is not None:
+                    try:
+                        server.shutdown()
+                    finally:
+                        server_thread.join()
+            finally:
+                try:
+                    server.server_close()
+                finally:
+                    client.close()
     raise SystemExit(returncode)
 
 
@@ -1520,14 +1541,16 @@ def launch(
     binary = SPEC["binary"]
     workspace = state.get("workspace")
     discovery_token = None
-    if workspace and os.environ.get(GATEWAY_MODEL_DISCOVERY_ENV_VAR) == "1":
+    discovery_enabled = bool(workspace and os.environ.get(GATEWAY_MODEL_DISCOVERY_ENV_VAR) == "1")
+    if discovery_enabled:
         # Discovery is launch-scoped. Pass it in the process environment rather
         # than persisting it in Claude's private or OS-managed settings.
         os.environ["CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY"] = "1"
-        discovery_token = _prime_gateway_models_cache(state, workspace)
     if state.get("claude_relayed"):
         _launch_relayed(state, binary, tool_args)
         return
+    if discovery_enabled:
+        discovery_token = _prime_gateway_models_cache(state, workspace)
     # Smart routing needs Unix PTY support, which Windows does not provide.
     if options.launch_smart_routing and os.name == "nt":
         raise RuntimeError(

@@ -1405,6 +1405,9 @@ class TestClaudeLaunch:
             def shutdown(self):
                 calls.append(("shutdown",))
 
+            def server_close(self):
+                calls.append(("server_close",))
+
         class Cache:
             def stop(self):
                 calls.append(("stop",))
@@ -1435,6 +1438,7 @@ class TestClaudeLaunch:
 
         monkeypatch.setattr(claude, "_managed_relayed_conflicts", lambda: None)
         monkeypatch.setattr(claude, "_ensure_subscription_login", lambda: None)
+        monkeypatch.delenv(claude.GATEWAY_MODEL_DISCOVERY_ENV_VAR, raising=False)
         monkeypatch.setattr(claude.gateway_proxy, "start_proxy", start_proxy)
         monkeypatch.setattr(claude.subprocess, "Popen", Process)
 
@@ -1459,7 +1463,55 @@ class TestClaudeLaunch:
             claude.gateway_proxy.AI_GATEWAY_TOKEN_HEADER,
             False,
         )
-        assert calls[-3:] == [("stop",), ("shutdown",), ("close",)]
+        assert calls[-4:] == [("stop",), ("shutdown",), ("server_close",), ("close",)]
+
+    def test_relayed_cache_refresh_failure_closes_proxy_resources(self, monkeypatch):
+        calls: list[str] = []
+
+        class Server:
+            server_address = ("127.0.0.1", 12345)
+
+            def serve_forever(self):
+                raise AssertionError("server must not start before cache refresh succeeds")
+
+            def shutdown(self):
+                calls.append("shutdown")
+
+            def server_close(self):
+                calls.append("server_close")
+
+        class Cache:
+            def stop(self):
+                calls.append("cache.stop")
+
+        class Client:
+            def close(self):
+                calls.append("client.close")
+
+        monkeypatch.setenv(claude.GATEWAY_MODEL_DISCOVERY_ENV_VAR, "1")
+        monkeypatch.setattr(claude, "_ensure_subscription_login", lambda: None)
+        monkeypatch.setattr(
+            claude.gateway_proxy,
+            "start_proxy",
+            lambda *_args, **_kwargs: (Server(), Cache(), Client()),
+        )
+        monkeypatch.setattr(
+            claude,
+            "_prime_gateway_models_cache",
+            Mock(side_effect=RuntimeError("refresh failed")),
+        )
+        popen = Mock()
+        monkeypatch.setattr(claude.subprocess, "Popen", popen)
+
+        with pytest.raises(RuntimeError, match="refresh failed"):
+            claude._launch_relayed(
+                {"workspace": WS, "claude_relayed": True, "relayed_proxy_port": 12345},
+                "claude",
+                [],
+            )
+
+        assert calls == ["cache.stop", "server_close", "client.close"]
+        popen.assert_not_called()
 
     def test_smart_routing_on_windows_is_not_supported(self, monkeypatch):
         monkeypatch.setenv(v2.ENV_VAR, "1")
@@ -1586,9 +1638,10 @@ class TestClaudeLaunch:
 
 class TestGatewayModelsCache:
     def test_switching_parents_replaces_cached_models(self, tmp_path, monkeypatch):
-        cache_path = tmp_path / "cache" / "gateway-models.json"
+        config_dir = tmp_path / "custom claude config"
+        cache_path = config_dir / "cache" / "gateway-models.json"
         calls = []
-        monkeypatch.setattr(claude, "CLAUDE_GATEWAY_MODELS_CACHE_PATH", cache_path)
+        monkeypatch.setenv(claude.CLAUDE_CONFIG_DIR_ENV_VAR, str(config_dir))
         monkeypatch.setattr(claude, "_launch_token", lambda *_args: "token")
         monkeypatch.setattr(claude.time, "time", lambda: 123.456)
 
@@ -1609,6 +1662,104 @@ class TestGatewayModelsCache:
             "models": [{"id": "model-from-main.default"}],
         }
         assert calls[-1][2] == {claude.MODEL_SERVICE_PARENT_SCHEMA_HEADER: "main.default"}
+
+    def test_cache_path_falls_back_to_current_home(self, tmp_path, monkeypatch):
+        monkeypatch.delenv(claude.CLAUDE_CONFIG_DIR_ENV_VAR, raising=False)
+        monkeypatch.setattr(claude.Path, "home", lambda: tmp_path)
+
+        claude._write_gateway_models_cache("https://gateway", [{"id": "model"}])
+
+        cache_path = tmp_path / ".claude" / "cache" / "gateway-models.json"
+        assert json.loads(cache_path.read_text(encoding="utf-8"))["baseUrl"] == "https://gateway"
+
+    def test_write_failure_reports_cache_path(self, tmp_path, monkeypatch):
+        config_dir = tmp_path / "custom"
+        monkeypatch.setenv(claude.CLAUDE_CONFIG_DIR_ENV_VAR, str(config_dir))
+        monkeypatch.setattr(
+            claude,
+            "write_json_file",
+            Mock(side_effect=RuntimeError("generic config write failed")),
+        )
+
+        with pytest.raises(RuntimeError, match=r"Claude Code's model cache.*gateway-models.json"):
+            claude._write_gateway_models_cache("https://gateway", [{"id": "model"}])
+
+        assert not list((config_dir / "cache").glob("*.tmp"))
+
+    def test_relayed_port_fallback_aligns_cache_settings_and_state(self, tmp_path, monkeypatch):
+        import socket
+
+        settings_path = tmp_path / "ucode-settings.json"
+        config_dir = tmp_path / "claude-config"
+        cache_path = config_dir / "cache" / "gateway-models.json"
+        saved_states: list[dict] = []
+        launched: list[list[str]] = []
+        caches = []
+
+        class Cache:
+            def __init__(self, *_args, **_kwargs):
+                self.stopped = False
+                caches.append(self)
+
+            def run_refresher(self):
+                return None
+
+            def stop(self):
+                self.stopped = True
+
+        class Process:
+            def __init__(self, argv):
+                launched.append(argv)
+
+            def wait(self):
+                return 0
+
+        occupied = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        occupied.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        occupied.bind((claude.LOOPBACK_HOST, 0))
+        occupied.listen(1)
+        busy_port = occupied.getsockname()[1]
+        settings_path.write_text(
+            json.dumps({"env": {"ANTHROPIC_BASE_URL": f"http://127.0.0.1:{busy_port}"}}),
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv(claude.GATEWAY_MODEL_DISCOVERY_ENV_VAR, "1")
+        monkeypatch.setenv(claude.CLAUDE_CONFIG_DIR_ENV_VAR, str(config_dir))
+        monkeypatch.setattr(claude, "CLAUDE_SETTINGS_PATH", settings_path)
+        monkeypatch.setattr(claude, "_ensure_subscription_login", lambda: None)
+        monkeypatch.setattr(claude, "_launch_token", lambda *_args: "token")
+        monkeypatch.setattr(
+            claude,
+            "fetch_anthropic_gateway_models",
+            lambda *_args, **_kwargs: ([{"id": "scoped-model"}], None),
+        )
+        monkeypatch.setattr(claude, "save_state", lambda state: saved_states.append(dict(state)))
+        monkeypatch.setattr(claude.gateway_proxy, "TokenCache", Cache)
+        monkeypatch.setattr(claude.subprocess, "Popen", Process)
+        state = {
+            "workspace": WS,
+            "profile": "test",
+            "claude_relayed": True,
+            "relayed_proxy_port": busy_port,
+        }
+
+        try:
+            with pytest.raises(SystemExit) as exc:
+                claude.launch(state, ["--debug"], options=LaunchOptions())
+        finally:
+            occupied.close()
+
+        assert exc.value.code == 0
+        bound_port = state["relayed_proxy_port"]
+        expected_base_url = f"http://127.0.0.1:{bound_port}"
+        assert bound_port != busy_port
+        assert saved_states[-1]["relayed_proxy_port"] == bound_port
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        assert settings["env"]["ANTHROPIC_BASE_URL"] == expected_base_url
+        assert json.loads(cache_path.read_text(encoding="utf-8"))["baseUrl"] == expected_base_url
+        assert str(settings_path) in launched[0]
+        assert caches and caches[0].stopped is True
 
     def test_failed_refresh_blocks_launch(self, monkeypatch):
         monkeypatch.setenv(claude.GATEWAY_MODEL_DISCOVERY_ENV_VAR, "1")
