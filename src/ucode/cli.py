@@ -121,6 +121,7 @@ from ucode.smart_routing.claude_hooks import FIRST_PROMPT_SOCKET_ENV, ROUTE_FIRS
 from ucode.state import (
     STATE_PATH,
     clear_state,
+    developer_state_from_resolved,
     get_model_location,
     get_provider_service,
     load_full_state,
@@ -838,6 +839,7 @@ def configure_workspace_command(
         )
     if managed is not None:
         _announce_managed_config(managed)
+        developer_state = state
         managed_tools = managed_enabled_tools(managed)
         location_targets = selected_tools if selected_tools is not None else managed_tools
         fallback_location_tools = [
@@ -851,7 +853,7 @@ def configure_workspace_command(
             tool_name for tool_name in fallback_location_tools if tool_name not in managed_tools
         ]
         for tool_name in tools_to_configure:
-            resolved = resolve_state(managed, state, tool_name)
+            resolved = resolve_state(managed, developer_state, tool_name)
             if tool_name in fallback_location_tools:
                 configured = _configure_tools_with_model_location(
                     resolved,
@@ -859,14 +861,15 @@ def configure_workspace_command(
                     model_location,
                     install_ai_tools=not is_dry_run(),
                 )
-            elif check_gateway_endpoint(state, tool_name):
+            elif check_gateway_endpoint(developer_state, tool_name):
                 configured = configure_selected_tools(
                     resolved, [tool_name], install_ai_tools=not is_dry_run()
                 )
             else:
                 continue
-            state = configured
             _print_configured_files(tool_name, configured)
+            developer_state = developer_state_from_resolved(configured)
+        state = developer_state
         _summarize_managed_config(managed, state["workspace"])
         return 0
 
