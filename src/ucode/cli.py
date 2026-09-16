@@ -2625,8 +2625,7 @@ def claude_cmd(
         str | None,
         typer.Option(
             "--model-location",
-            help="Set the model schema header to `<catalog>.<schema>`. "
-            "Does not enable model discovery. Example: main.default",
+            help="Set the model schema header to `<catalog>.<schema>`.",
         ),
     ] = None,
     model: Annotated[
@@ -2668,8 +2667,7 @@ def claude_cmd(
         typer.Option(
             "--enable-model-discovery",
             hidden=True,
-            help="Enable AI Gateway models in Claude Code's model picker. "
-            "Combine with --model-location to scope discovery to a catalog and schema.",
+            help="Enable AI Gateway models in Claude Code's model picker.",
         ),
     ] = False,
     enable_smart_routing_flag: Annotated[
