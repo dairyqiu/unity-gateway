@@ -382,8 +382,6 @@ def render_overlay(
         header_lines.append(f"{MODEL_PROVIDER_SERVICE_HEADER}: {provider}")
     elif parent_schema:
         header_lines.append(f"{MODEL_SERVICE_PARENT_SCHEMA_HEADER}: {parent_schema}")
-    # Stamp the router recipe on every inference request so the gateway can attribute
-    # traffic to it.
     if smart_routing_v2.enabled():
         header_lines.append(f"{SMART_ROUTER_RECIPE_HEADER}: {configured_router_name()}")
     # Relayed: the X-Databricks-AI-Gateway-Token swap header is added per request

@@ -198,8 +198,6 @@ def _provider_block(
         http_headers[MODEL_PROVIDER_SERVICE_HEADER] = provider
     elif parent_schema:
         http_headers[MODEL_SERVICE_PARENT_SCHEMA_HEADER] = parent_schema
-    # Stamp the router recipe on every inference request so the gateway can attribute
-    # traffic to it.
     if smart_routing_v2.enabled():
         http_headers[SMART_ROUTER_RECIPE_HEADER] = configured_router_name()
     return {
