@@ -588,6 +588,22 @@ class TestSubcommandRouting:
         with cli_mod._managed_smart_routing_environment(managed, "codex"):
             assert "SMART_ROUTING_V2_ENABLED" not in os.environ
 
+    @pytest.mark.parametrize("tool", ["claude", "codex"])
+    def test_managed_smart_routing_enables_launch_policy(self, tool):
+        managed = {"enabled_agents": {tool: {"smart_routing_enabled": True}}}
+
+        enabled = cli_mod._managed_smart_routing_enabled(managed, tool)
+        options = cli_mod._launch_options(
+            tool,
+            [],
+            smart_routing_enabled=enabled,
+            explicit_prompt=False,
+            model=None,
+            provider=None,
+        )
+
+        assert options.launch_smart_routing is True
+
     @pytest.mark.parametrize(
         ("tool_args", "expected"),
         [

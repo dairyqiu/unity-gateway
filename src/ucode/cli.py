@@ -2004,8 +2004,7 @@ def _launch_options(
 @contextmanager
 def _managed_smart_routing_environment(managed: dict | None, tool: str) -> Iterator[None]:
     """Expose an agent's managed smart-routing switch only to its launched session."""
-    agent_config = ((managed or {}).get("enabled_agents") or {}).get(tool) or {}
-    if agent_config.get("smart_routing_enabled") is not True:
+    if not _managed_smart_routing_enabled(managed, tool):
         yield
         return
 
@@ -2019,6 +2018,12 @@ def _managed_smart_routing_environment(managed: dict | None, tool: str) -> Itera
             os.environ.pop(name, None)
         else:
             os.environ[name] = previous
+
+
+def _managed_smart_routing_enabled(managed: dict | None, tool: str) -> bool:
+    """Whether the workspace enabled smart routing for this specific agent."""
+    agent_config = ((managed or {}).get("enabled_agents") or {}).get(tool) or {}
+    return agent_config.get("smart_routing_enabled") is True
 
 
 def _launch_tool(
@@ -2091,6 +2096,11 @@ def _launch_tool(
             managed, coding_agent_config_feature_disabled = _fetch_managed_config(state)
         # Checked before discovery, which can take tens of seconds, so a blocked launch fails fast.
         _reject_disabled_agent(managed, tool)
+        # The environment switch remains a developer override; managed config is the workspace
+        # policy equivalent and must take effect before launch options are computed.
+        smart_routing_enabled = smart_routing_enabled or _managed_smart_routing_enabled(
+            managed, tool
+        )
         # Discovery exists to find models and isn't needed for managed config that already names them.
         managed_models_known = managed_supplies_models(managed, tool)
         # Re-fetch model lists on every launch so newly-added Databricks
@@ -2280,7 +2290,7 @@ def _launch_tool(
             _register_managed_mcp_servers(managed, tool, state)
             _download_managed_skills(managed, state)
         if tool == "claude":
-            if smart_routing_v2.enabled():
+            if smart_routing_enabled:
                 # Transient launch precedence for the v2 PTY's initial --model flag.
                 # An explicit choice wins, followed by a routed/managed root pick;
                 # neither value is persisted into workspace state.
