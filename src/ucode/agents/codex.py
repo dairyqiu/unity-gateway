@@ -135,7 +135,7 @@ def _parse_version(value: str) -> tuple[int, int, int] | None:
 
 def minimum_version_error() -> str | None:
     """Return the active smart-routing version blocker, if any."""
-    if not smart_routing_v2.enabled():
+    if not smart_routing_v2.smart_routing_enabled():
         return None
     version = agent_version(SPEC["binary"])
     parsed = _parse_version(version)
@@ -458,7 +458,7 @@ def write_tool_config(
         prune_key_paths(base, _MODEL_SERVICE_ROUTING_KEY_PATHS)
         deep_merge_dict(base, copy.deepcopy(overlay))
         # deep_merge can't drop keys, so clear model preferences from an earlier run.
-        if chosen_model is None and not smart_routing_v2.enabled():
+        if chosen_model is None and not smart_routing_v2.smart_routing_enabled():
             for key in ("model", "model_reasoning_effort"):
                 base.pop(key, None)
         if include_catalog:
@@ -586,7 +586,7 @@ def default_model(state: dict) -> str | None:
     """Return a managed Codex model, or leave selection to Codex."""
     if isinstance(state.get("codex_default_model"), str):
         return state["codex_default_model"]
-    if smart_routing_v2.enabled():
+    if smart_routing_v2.smart_routing_enabled():
         return _smart_routing_config_model(state)
     clear_model_preferences(state)
     return None
@@ -615,7 +615,7 @@ def config_precedence_paths() -> tuple[Path, ...]:
 
 def clear_model_preferences(state: dict) -> bool:
     """Remove ucode profile model preferences so Codex selects its default."""
-    if smart_routing_v2.enabled():
+    if smart_routing_v2.smart_routing_enabled():
         return False
     if isinstance(state.get("codex_default_model"), str):
         return False

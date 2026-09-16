@@ -101,7 +101,7 @@ def _parse_version(value: str) -> tuple[int, int, int] | None:
 
 
 def _minimum_version_requirement_message(version: str) -> str:
-    feature = "Smart routing" if smart_routing_v2.enabled() else "Model discovery"
+    feature = "Smart routing" if smart_routing_v2.smart_routing_enabled() else "Model discovery"
     return (
         f"{feature} requires Claude Code {MINIMUM_CLAUDE_VERSION_TEXT} or newer. "
         f"Your current version is Claude Code {version}."
@@ -109,7 +109,10 @@ def _minimum_version_requirement_message(version: str) -> str:
 
 
 def minimum_version_error() -> str | None:
-    if os.environ.get(GATEWAY_MODEL_DISCOVERY_ENV_VAR) != "1" and not smart_routing_v2.enabled():
+    if (
+        os.environ.get(GATEWAY_MODEL_DISCOVERY_ENV_VAR) != "1"
+        and not smart_routing_v2.smart_routing_enabled()
+    ):
         return None
     version = agent_version(SPEC["binary"])
     parsed = _parse_version(version)
@@ -1321,16 +1324,6 @@ def _compose_v2_settings(tool_args: list[str]) -> tuple[dict, list[str]]:
     return _merge_claude_settings(settings, read_json_safe(CLAUDE_SETTINGS_PATH)), remaining
 
 
-def _original_launch_model(state: dict) -> str | None:
-    override = state.get("_claude_launch_model")
-    if isinstance(override, str) and override.strip():
-        return override.strip()
-    value = read_json_safe(CLAUDE_USER_SETTINGS_PATH).get("model")
-    if isinstance(value, str) and value.strip():
-        return value.strip()
-    return default_model(state)
-
-
 def _launch_model_args(tool_args: list[str], launch_model: str | None) -> list[str]:
     if not launch_model or has_explicit_model_arg(tool_args):
         return []
@@ -1506,7 +1499,8 @@ def launch(
             tool_args,
             binary=binary,
             user_settings_path=CLAUDE_USER_SETTINGS_PATH,
-            launch_model=_original_launch_model(state),
+            # With no user pin, let Claude resolve its starting model from its own settings.
+            launch_model=options.user_pinned_model,
             compose_settings=_compose_v2_settings,
             launch_model_args=_launch_model_args,
             model_name=_maybe_add_1m_suffix,
@@ -1514,9 +1508,16 @@ def launch(
         return
     if workspace:
         os.environ["OAUTH_TOKEN"] = get_databricks_token(workspace, state.get("profile"))
-    if options.claude_launch_model:
-        os.environ["ANTHROPIC_MODEL"] = options.claude_launch_model
-    exec_or_spawn(_build_claude_argv(binary, tool_args))
+    settings_override = None
+    launch_args = list(tool_args)
+    if options.user_pinned_model:
+        os.environ["ANTHROPIC_MODEL"] = options.user_pinned_model
+        settings_override = {"env": {"ANTHROPIC_MODEL": options.user_pinned_model}}
+        launch_args = [
+            *_launch_model_args(tool_args, options.user_pinned_model),
+            *tool_args,
+        ]
+    exec_or_spawn(_build_claude_argv(binary, launch_args, settings_override=settings_override))
 
 
 def validate_cmd(binary: str) -> list[str]:

@@ -422,6 +422,13 @@ class TestClaudeSlots:
             "default_opus_model": "system.ai.claude-opus-4-8",
         }
 
+    def test_smart_routing_serializes_into_agent_config(self):
+        manifest = {
+            "enabled_agents": {"codex": {"smart_routing_enabled": True}},
+        }
+        payload = serialize_managed_config(manifest)
+        assert payload["enabled_agents"][0]["config"]["smart_routing"] == {"enabled": True}
+
 
 class TestClaudeFamilyCandidates:
     """Discovery keeps one id per family for the launch path; authoring needs the alternatives."""
