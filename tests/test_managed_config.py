@@ -96,6 +96,10 @@ class TestNormalize:
         claude = normalize_managed_config(RAW_MANIFEST)["enabled_agents"]["claude"]
         assert claude["http_headers"] == {"x-databricks-workspace": "eng-ml-inference"}
 
+    def test_smart_routing_maps_to_agent_switch(self):
+        claude = normalize_managed_config(RAW_MANIFEST)["enabled_agents"]["claude"]
+        assert claude["smart_routing_enabled"] is True
+
     def test_per_agent_tracing_enabled_is_carried(self):
         claude = normalize_managed_config(RAW_MANIFEST)["enabled_agents"]["claude"]
         assert claude["otel_tracing_enabled"] is True

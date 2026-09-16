@@ -474,14 +474,14 @@ class TestSubcommandRouting:
         with patch(
             "ucode.cli._launch_tool",
             side_effect=lambda *_args, **_kwargs: enabled_during_launch.append(
-                os.environ.get("ENABLE_SMART_ROUTING_V2")
+                os.environ.get(cli_mod.smart_routing_v2.ENABLE_SMART_ROUTING_ENV_VAR)
             ),
         ) as mock_launch:
             result = runner.invoke(app, ["codex", "--enable-smart-routing"])
 
         assert result.exit_code == 0, result.output
         assert enabled_during_launch == ["1"]
-        assert "ENABLE_SMART_ROUTING_V2" not in os.environ
+        assert cli_mod.smart_routing_v2.ENABLE_SMART_ROUTING_ENV_VAR not in os.environ
         assert mock_launch.call_args.args[1].args == []
 
     @pytest.mark.parametrize("tool, subcommand", [("codex", "app"), ("claude", "update")])
@@ -494,20 +494,22 @@ class TestSubcommandRouting:
         with patch(
             "ucode.cli._launch_tool",
             side_effect=lambda *_args, **_kwargs: observed.append(
-                os.environ.get("ENABLE_SMART_ROUTING_V2")
+                os.environ.get(cli_mod.smart_routing_v2.ENABLE_SMART_ROUTING_ENV_VAR)
             ),
         ):
             result = runner.invoke(app, [tool, subcommand])
 
         assert result.exit_code == 0, result.output
         assert observed == [None]
-        assert os.environ["ENABLE_SMART_ROUTING_V2"] == "1"
+        assert os.environ[cli_mod.smart_routing_v2.ENABLE_SMART_ROUTING_ENV_VAR] == "1"
 
     def test_claude_enable_smart_routing_forwards_positional_prompt_to_v2(self):
         captured = []
 
         def capture(_tool, ctx, **_kwargs):
-            captured.append((os.environ.get("ENABLE_SMART_ROUTING_V2"), ctx.args))
+            captured.append(
+                (os.environ.get(cli_mod.smart_routing_v2.ENABLE_SMART_ROUTING_ENV_VAR), ctx.args)
+            )
 
         with patch("ucode.cli._launch_tool", side_effect=capture):
             result = runner.invoke(
@@ -560,7 +562,7 @@ class TestSubcommandRouting:
             tool_args,
             smart_routing_enabled=True,
             explicit_prompt=explicit_prompt,
-            model=model,
+            user_pinned_model=model,
             provider=provider,
         )
 
@@ -584,7 +586,7 @@ class TestSubcommandRouting:
             tool_args,
             smart_routing_enabled=True,
             explicit_prompt=False,
-            model=None,
+            user_pinned_model=None,
             provider=None,
         )
 
@@ -754,7 +756,6 @@ class TestSubcommandRouting:
 
         assert result.exit_code == 0, result.output
         assert mock_configure.call_args.kwargs["route_root_model"] is None
-        assert "_claude_launch_model" not in mock_launch.call_args.args[1]
         assert mock_launch.call_args.kwargs["options"].launch_smart_routing is True
 
     def test_claude_v2_first_prompt_hook_is_disabled_without_flag(self, monkeypatch):
@@ -947,8 +948,7 @@ class TestClaudeModelFlag:
         assert mock_configure.call_args.kwargs["custom_model"] is None
         assert mock_configure.call_args.kwargs["route_root_model"] is None
         assert (
-            mock_launch.call_args.kwargs["options"].claude_launch_model
-            == "cat.schema.claude-opus-5"
+            mock_launch.call_args.kwargs["options"].user_pinned_model == "cat.schema.claude-opus-5"
         )
 
     def test_v2_model_sets_transient_launch_override(self, monkeypatch):
@@ -967,7 +967,7 @@ class TestClaudeModelFlag:
             result = runner.invoke(app, ["claude", "--model", "system.ai.glm-5-2"])
 
         assert result.exit_code == 0, result.output
-        assert mock_launch.call_args.args[1]["_claude_launch_model"] == "system.ai.glm-5-2"
+        assert mock_launch.call_args.kwargs["options"].user_pinned_model == "system.ai.glm-5-2"
         assert mock_launch.call_args.kwargs["options"].launch_smart_routing is False
 
     @staticmethod
