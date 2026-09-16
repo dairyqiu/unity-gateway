@@ -1980,12 +1980,8 @@ def _launch_options(
     explicit_prompt: bool,
     model: str | None,
     provider: str | None,
-    claude_launch_model: str | None = None,
 ) -> LaunchOptions:
     return LaunchOptions(
-        claude_launch_model=(claude_launch_model or model)
-        if tool == "claude" and provider is None
-        else None,
         launch_smart_routing=(
             # Smart routing is enabled globally.
             smart_routing_enabled
@@ -2292,13 +2288,12 @@ def _launch_tool(
             _register_managed_mcp_servers(managed, tool, state)
             _download_managed_skills(managed, state)
         if tool == "claude":
-            if smart_routing_enabled:
-                # Transient launch precedence for the v2 PTY's initial --model flag.
-                # An explicit choice wins, followed by a routed/managed root pick;
-                # neither value is persisted into workspace state.
-                launch_model = model or route_root_model
-                if launch_model:
-                    state["_claude_launch_model"] = launch_model
+            # An explicit choice wins, followed by a managed root default. Keep the resolved model
+            # in transient launch state for both direct and routed Claude sessions; it is never
+            # persisted into workspace state.
+            launch_model = model or route_root_model
+            if launch_model and provider is None:
+                state["_claude_launch_model"] = launch_model
             if provider:
                 state["_claude_launch_provider"] = provider
         elif tool == "codex":
@@ -2315,7 +2310,6 @@ def _launch_tool(
             # initial/fallback model and still participates in a routed Claude session.
             model=model,
             provider=provider,
-            claude_launch_model=model or (route_root_model if tool == "claude" else None),
         )
         print_success(f"Starting {TOOL_SPECS[tool]['display']}")
         with _managed_smart_routing_environment(managed, tool):

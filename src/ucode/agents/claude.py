@@ -1278,13 +1278,17 @@ def _compose_v2_settings(tool_args: list[str]) -> tuple[dict, list[str]]:
 
 
 def _original_launch_model(state: dict) -> str | None:
-    override = state.get("_claude_launch_model")
-    if isinstance(override, str) and override.strip():
-        return override.strip()
+    if override := _launch_model_override(state):
+        return override
     value = read_json_safe(CLAUDE_USER_SETTINGS_PATH).get("model")
     if isinstance(value, str) and value.strip():
         return value.strip()
     return default_model(state)
+
+
+def _launch_model_override(state: dict) -> str | None:
+    value = state.get("_claude_launch_model")
+    return value.strip() if isinstance(value, str) and value.strip() else None
 
 
 def _launch_model_args(tool_args: list[str], launch_model: str | None) -> list[str]:
@@ -1470,8 +1474,8 @@ def launch(
         return
     if workspace:
         os.environ["OAUTH_TOKEN"] = get_databricks_token(workspace, state.get("profile"))
-    if options.claude_launch_model:
-        os.environ["ANTHROPIC_MODEL"] = options.claude_launch_model
+    if launch_model := _launch_model_override(state):
+        os.environ["ANTHROPIC_MODEL"] = launch_model
     exec_or_spawn(_build_claude_argv(binary, tool_args))
 
 

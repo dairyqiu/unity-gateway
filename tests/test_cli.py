@@ -628,7 +628,7 @@ class TestSubcommandRouting:
 
         assert options.launch_smart_routing is expected
 
-    def test_claude_managed_default_seeds_launch_without_disabling_routing(self):
+    def test_claude_managed_default_does_not_disable_routing(self):
         options = cli_mod._launch_options(
             "claude",
             [],
@@ -636,11 +636,9 @@ class TestSubcommandRouting:
             explicit_prompt=False,
             model=None,
             provider=None,
-            claude_launch_model="system.ai.claude-sonnet-4-6",
         )
 
         assert options.launch_smart_routing is True
-        assert options.claude_launch_model == "system.ai.claude-sonnet-4-6"
 
     def test_codex_refresh_is_consumed_by_ucode(self):
         with patch("ucode.cli._launch_tool") as mock_launch:
@@ -986,13 +984,10 @@ class TestClaudeModelFlag:
         ):
             result = runner.invoke(app, ["claude", "--model", "cat.schema.claude-opus-5"])
         assert result.exit_code == 0, result.output
-        # The model is passed through invocation-scoped LaunchOptions, not persisted in settings.
+        # The model is passed through transient launch state, not persisted in settings.
         assert mock_configure.call_args.kwargs["custom_model"] is None
         assert mock_configure.call_args.kwargs["route_root_model"] is None
-        assert (
-            mock_launch.call_args.kwargs["options"].claude_launch_model
-            == "cat.schema.claude-opus-5"
-        )
+        assert mock_launch.call_args.args[1]["_claude_launch_model"] == "cat.schema.claude-opus-5"
 
     def test_v2_model_sets_transient_launch_override(self, monkeypatch):
         monkeypatch.setenv("ENABLE_SMART_ROUTING_V2", "1")
