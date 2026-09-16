@@ -826,3 +826,30 @@ def test_routing_request_uses_models_prompt_and_same_token(monkeypatch):
         "route_selector": {"router_name": codex_routing.routing.ROUTER_NAME},
     }
     assert "same-oauth-token" not in logged[0]
+
+
+def test_routing_request_deduplicates_equivalent_gpt_spellings(monkeypatch):
+    captured = {}
+
+    def select_route(workspace, token, task, route_options, resolve, *, router_name, timeout):
+        captured["route_options"] = list(route_options)
+        return None, "not selected"
+
+    monkeypatch.setattr(codex_routing.routing, "select_route", select_route)
+
+    codex_routing.request_routing_decision(
+        WS,
+        "token",
+        "Fix the parser",
+        [
+            "system.ai.gpt-5-6-sol",
+            "gpt-5.6-sol",
+            "system.ai.gpt-5-6-luna",
+            "gpt-5.6-luna",
+        ],
+    )
+
+    assert captured["route_options"] == [
+        ("gpt-5-6-sol", "codex"),
+        ("gpt-5-6-luna", "codex"),
+    ]
