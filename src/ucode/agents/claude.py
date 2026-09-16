@@ -1277,13 +1277,6 @@ def _compose_v2_settings(tool_args: list[str]) -> tuple[dict, list[str]]:
     return _merge_claude_settings(settings, read_json_safe(CLAUDE_SETTINGS_PATH)), remaining
 
 
-def _original_launch_model(state: dict) -> str | None:
-    value = read_json_safe(CLAUDE_USER_SETTINGS_PATH).get("model")
-    if isinstance(value, str) and value.strip():
-        return value.strip()
-    return default_model(state)
-
-
 def _launch_model_args(tool_args: list[str], launch_model: str | None) -> list[str]:
     if not launch_model or has_explicit_model_arg(tool_args):
         return []
@@ -1459,7 +1452,8 @@ def launch(
             tool_args,
             binary=binary,
             user_settings_path=CLAUDE_USER_SETTINGS_PATH,
-            launch_model=options.launch_model or _original_launch_model(state),
+            # With no user pin, let Claude resolve its starting model from its own settings.
+            launch_model=options.user_pinned_model,
             compose_settings=_compose_v2_settings,
             launch_model_args=_launch_model_args,
             model_name=_maybe_add_1m_suffix,
@@ -1467,8 +1461,8 @@ def launch(
         return
     if workspace:
         os.environ["OAUTH_TOKEN"] = get_databricks_token(workspace, state.get("profile"))
-    if options.launch_model:
-        os.environ["ANTHROPIC_MODEL"] = options.launch_model
+    if options.user_pinned_model:
+        os.environ["ANTHROPIC_MODEL"] = options.user_pinned_model
     exec_or_spawn(_build_claude_argv(binary, tool_args))
 
 

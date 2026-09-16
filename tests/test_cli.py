@@ -557,7 +557,6 @@ class TestSubcommandRouting:
             smart_routing_enabled=True,
             explicit_prompt=explicit_prompt,
             user_pinned_model=model,
-            settings_default_model=None,
             provider=provider,
         )
 
@@ -600,7 +599,6 @@ class TestSubcommandRouting:
             smart_routing_enabled=enabled,
             explicit_prompt=False,
             user_pinned_model=None,
-            settings_default_model=None,
             provider=None,
         )
 
@@ -625,36 +623,27 @@ class TestSubcommandRouting:
             smart_routing_enabled=True,
             explicit_prompt=False,
             user_pinned_model=None,
-            settings_default_model=None,
             provider=None,
         )
 
         assert options.launch_smart_routing is expected
 
-    def test_claude_managed_default_seeds_launch_without_disabling_routing(self):
+    def test_claude_without_user_pin_leaves_model_to_harness(self):
         options = cli_mod._launch_options(
             "claude",
             [],
             smart_routing_enabled=True,
             explicit_prompt=False,
             user_pinned_model=None,
-            settings_default_model="system.ai.claude-sonnet-4-6",
             provider=None,
         )
 
         assert options.launch_smart_routing is True
-        assert options.launch_model == "system.ai.claude-sonnet-4-6"
+        assert options.user_pinned_model is None
 
-    def test_user_model_wins_over_managed_default(self):
-        options = cli_mod.LaunchOptions(
-            user_pinned_model="user-model",
-            settings_default_model="settings-model",
-        )
-
-        assert options.launch_model == "user-model"
-
-    def test_harness_chooses_model_when_no_override_exists(self):
-        assert cli_mod.LaunchOptions().launch_model is None
+    def test_launch_options_carry_user_pin(self):
+        options = cli_mod.LaunchOptions(user_pinned_model="user-model")
+        assert options.user_pinned_model == "user-model"
 
     def test_codex_refresh_is_consumed_by_ucode(self):
         with patch("ucode.cli._launch_tool") as mock_launch:
@@ -1002,7 +991,10 @@ class TestClaudeModelFlag:
         # The model is passed through invocation-scoped LaunchOptions, not persisted in settings.
         assert mock_configure.call_args.kwargs["custom_model"] is None
         assert mock_configure.call_args.kwargs["route_root_model"] is None
-        assert mock_launch.call_args.kwargs["options"].launch_model == "cat.schema.claude-opus-5"
+        assert (
+            mock_launch.call_args.kwargs["options"].user_pinned_model
+            == "cat.schema.claude-opus-5"
+        )
 
     def test_v2_model_sets_transient_launch_override(self, monkeypatch):
         monkeypatch.setenv("ENABLE_SMART_ROUTING_V2", "1")
@@ -1020,7 +1012,7 @@ class TestClaudeModelFlag:
             result = runner.invoke(app, ["claude", "--model", "system.ai.glm-5-2"])
 
         assert result.exit_code == 0, result.output
-        assert mock_launch.call_args.kwargs["options"].launch_model == "system.ai.glm-5-2"
+        assert mock_launch.call_args.kwargs["options"].user_pinned_model == "system.ai.glm-5-2"
         assert mock_launch.call_args.kwargs["options"].launch_smart_routing is False
 
     @staticmethod

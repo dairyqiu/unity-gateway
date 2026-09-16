@@ -1979,12 +1979,10 @@ def _launch_options(
     smart_routing_enabled: bool,
     explicit_prompt: bool,
     user_pinned_model: str | None,
-    settings_default_model: str | None,
     provider: str | None,
 ) -> LaunchOptions:
     return LaunchOptions(
         user_pinned_model=user_pinned_model if provider is None else None,
-        settings_default_model=settings_default_model if provider is None else None,
         launch_smart_routing=(
             # Smart routing is enabled globally.
             smart_routing_enabled
@@ -2307,7 +2305,6 @@ def _launch_tool(
             # Only a developer's explicit model disables routing. A managed default is the
             # initial/fallback model and still participates in a routed session.
             user_pinned_model=model or forwarded_model,
-            settings_default_model=managed_model if provider is None else None,
             provider=provider,
         )
         print_success(f"Starting {TOOL_SPECS[tool]['display']}")

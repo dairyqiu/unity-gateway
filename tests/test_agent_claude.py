@@ -1525,7 +1525,6 @@ class TestClaudeLaunch:
     def test_v2_positional_prompt_uses_first_prompt_routing(self, monkeypatch, tool_args):
         monkeypatch.setenv(v2.ENV_VAR, "1")
         launch_v2 = Mock()
-        monkeypatch.setattr(claude, "_original_launch_model", lambda _state: None)
         monkeypatch.setattr(v2, "launch_claude", launch_v2)
 
         claude.launch(

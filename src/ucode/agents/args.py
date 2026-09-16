@@ -11,12 +11,6 @@ class LaunchOptions:
 
     launch_smart_routing: bool = False
     user_pinned_model: str | None = None
-    settings_default_model: str | None = None
-
-    @property
-    def launch_model(self) -> str | None:
-        """The launch override, leaving the harness in control when neither source specifies one."""
-        return self.user_pinned_model or self.settings_default_model
 
 
 def explicit_model_arg_value(tool_args: list[str]) -> str | None:
