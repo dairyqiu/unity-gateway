@@ -39,6 +39,7 @@ _GPT_RE = re.compile(r"gpt-(\d+)(?:[.-](\d+))?(?:[.-](\d+))?(-.+|[a-z].*)?")
 _normalize_model = routing.normalize_model
 
 
+# TODO: Remove once server-side smart routing is more robust to duplicate model names.
 def _normalize_route_model(model: str) -> str:
     """Canonicalize equivalent Codex GPT spellings to one router option."""
     normalized = _normalize_model(model)
