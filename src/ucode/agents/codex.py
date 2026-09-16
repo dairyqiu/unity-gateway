@@ -383,9 +383,15 @@ def write_tool_config(
     workspace = state["workspace"]
     # Leave model selection to Codex. The gateway still receives the configured
     # provider and authentication settings, while Codex uses its own default.
-    # A managed default is the sole exception.
-    managed_model = state.get("codex_default_model")
-    chosen_model = managed_model if isinstance(managed_model, str) else None
+    # A managed default is the exception; a budget recommendation pinned by
+    # `_launch_tool` overrides it for one launch, popped (not read) so save_state
+    # can't persist it into a later plain `ug configure`.
+    launch_model = state.pop("_codex_launch_model", None)
+    if isinstance(launch_model, str) and launch_model:
+        chosen_model = codex_model_id(launch_model)
+    else:
+        managed_model = state.get("codex_default_model")
+        chosen_model = managed_model if isinstance(managed_model, str) else None
     databricks_profile = state.get("profile")
     static_models = state.get("codex_static_models")
     static_models = static_models if isinstance(static_models, list) and static_models else None

@@ -1132,6 +1132,63 @@ class TestClaudeModelFlag:
         assert mock_launch.call_args.args[1]["_codex_launch_parent_schema"] == "main.default"
 
 
+class TestCodexLaunchModelOverride:
+    """A budget recommendation that names a Codex model must reach the launched session, even
+    though `configure_tool`'s model arg is ignored for Codex (write_tool_config reads state)."""
+
+    @staticmethod
+    def _managed(default_model):
+        return {"enabled_agents": {"codex": {"model_config": {"default_model": default_model}}}}
+
+    @staticmethod
+    def _launch(*, managed, recommendation):
+        state = dict(MINIMAL_STATE)
+        with (
+            patch("ucode.cli.apply_pat_environment"),
+            patch("ucode.cli.ensure_bootstrap_dependencies"),
+            patch("ucode.cli.load_state", return_value=state),
+            patch("ucode.cli.ensure_provider_state", return_value=state),
+            patch("ucode.cli.configure_shared_state", return_value=state),
+            # Echo back the (managed-resolved) state configure_tool is handed, as the real one does,
+            # so a launch-scoped marker set before it reaches launch_agent.
+            patch("ucode.cli.configure_tool", side_effect=lambda tool, st, *a, **k: st),
+            patch("ucode.cli.get_databricks_token", return_value="tok"),
+            patch("ucode.cli._fetch_managed_config", return_value=(managed, False)),
+            patch("ucode.cli.get_model_recommendation", return_value=(recommendation, None)),
+            patch("ucode.cli.apply_managed_mcp_servers", return_value=[]),
+            patch("ucode.cli.launch_agent") as mock_launch,
+        ):
+            result = runner.invoke(app, ["codex"])
+        return result, mock_launch
+
+    def test_recommendation_pins_codex_launch_model(self):
+        result, mock_launch = self._launch(
+            managed=self._managed("databricks-gpt-5-2-codex"),
+            recommendation={"agent": "codex", "model": "system.ai.gpt-5-3-codex"},
+        )
+        assert result.exit_code == 0, result.output
+        assert mock_launch.call_args.args[1]["_codex_launch_model"] == "system.ai.gpt-5-3-codex"
+
+    def test_config_default_without_recommendation_sets_no_override(self):
+        result, mock_launch = self._launch(
+            managed=self._managed("databricks-gpt-5-2-codex"),
+            recommendation=None,
+        )
+        assert result.exit_code == 0, result.output
+        # No recommendation: the launch model equals the config default, so nothing is pinned and
+        # write_tool_config's existing codex_default_model path is left untouched.
+        assert "_codex_launch_model" not in mock_launch.call_args.args[1]
+
+    def test_recommendation_for_other_agent_sets_no_override(self):
+        result, mock_launch = self._launch(
+            managed=self._managed("databricks-gpt-5-2-codex"),
+            recommendation={"agent": "claude", "model": "system.ai.claude-opus-5"},
+        )
+        assert result.exit_code == 0, result.output
+        # The recommendation targets a different agent, so it names no Codex model to pin.
+        assert "_codex_launch_model" not in mock_launch.call_args.args[1]
+
+
 class TestGeminiProviderLaunch:
     @staticmethod
     def _launch(monkeypatch, resolve_provider_models):

@@ -244,6 +244,50 @@ class TestCodexWriteConfig:
         doc = read_toml_safe(config_path)
         assert "model" not in doc
 
+    def test_launch_model_override_pins_recommended_model(self, tmp_path, monkeypatch):
+        config_path = tmp_path / ".codex" / "ucode.config.toml"
+        monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", config_path)
+        monkeypatch.setattr(codex, "CODEX_BACKUP_PATH", tmp_path / "backup.toml")
+        monkeypatch.setattr(codex, "agent_version", lambda binary: "0.134.0")
+        monkeypatch.setattr(codex, "save_state", lambda state: None)
+
+        # A budget recommendation pinned a Codex model the config's default_model did not name.
+        state = {
+            "workspace": WS,
+            "codex_default_model": "databricks-gpt-5-2-codex",
+            "_codex_launch_model": "system.ai.gpt-5-3-codex",
+        }
+        codex.write_tool_config(state)
+
+        # The launch override wins over codex_default_model and is translated to Codex's slug.
+        assert read_toml_safe(config_path)["model"] == "gpt-5.3-codex"
+
+    def test_launch_model_override_is_single_use(self, tmp_path, monkeypatch):
+        config_path = tmp_path / ".codex" / "ucode.config.toml"
+        monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", config_path)
+        monkeypatch.setattr(codex, "CODEX_BACKUP_PATH", tmp_path / "backup.toml")
+        monkeypatch.setattr(codex, "agent_version", lambda binary: "0.134.0")
+        monkeypatch.setattr(codex, "save_state", lambda state: None)
+
+        state = {"workspace": WS, "_codex_launch_model": "system.ai.gpt-5-3-codex"}
+        codex.write_tool_config(state)
+
+        # Consumed so this launch's save_state can't persist it into a later plain `ug configure`.
+        assert "_codex_launch_model" not in state
+
+    def test_without_launch_override_uses_managed_default_model(self, tmp_path, monkeypatch):
+        config_path = tmp_path / ".codex" / "ucode.config.toml"
+        monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", config_path)
+        monkeypatch.setattr(codex, "CODEX_BACKUP_PATH", tmp_path / "backup.toml")
+        monkeypatch.setattr(codex, "agent_version", lambda binary: "0.134.0")
+        monkeypatch.setattr(codex, "save_state", lambda state: None)
+
+        state = {"workspace": WS, "codex_default_model": "admin-chosen-default"}
+        codex.write_tool_config(state)
+
+        # No launch override: the config's default_model still applies, as before.
+        assert read_toml_safe(config_path)["model"] == "admin-chosen-default"
+
     def test_provider_drops_stale_model_without_persisting_header(self, tmp_path, monkeypatch):
         config_path = tmp_path / ".codex" / "ucode.config.toml"
         backup_path = tmp_path / "codex-ucode-config.backup.toml"

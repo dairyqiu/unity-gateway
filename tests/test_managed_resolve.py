@@ -600,6 +600,17 @@ class TestManagedLaunchModel:
     def test_none_when_neither_names_a_model(self):
         assert managed_launch_model({}, None, "pi") is None
 
+    def test_recommended_codex_model_supersedes_codex_default(self):
+        managed = {
+            "enabled_agents": {
+                "codex": {"model_config": {"default_model": "databricks-gpt-5-2-codex"}}
+            }
+        }
+        rec = {"agent": "codex", "model": "system.ai.gpt-5-3-codex"}
+        assert managed_launch_model(managed, rec, "codex") == "system.ai.gpt-5-3-codex"
+        # Without a recommendation the codex config default stands.
+        assert managed_launch_model(managed, None, "codex") == "databricks-gpt-5-2-codex"
+
 
 class TestManagedStaticModels:
     """Static model curation: admin's explicit allow-list for Claude's picker."""

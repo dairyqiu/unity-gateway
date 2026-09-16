@@ -2207,6 +2207,11 @@ def _launch_tool(
                     route_root_model = managed_model
                 else:
                     resolved_model = managed_model
+                    # Codex ignores configure_tool's model arg — write_tool_config reads the model
+                    # from state — so a budget recommendation that overrode the config's
+                    # default_model has to be pinned launch-scoped or Codex never launches on it.
+                    if tool == "codex" and managed_model != state.get("codex_default_model"):
+                        state["_codex_launch_model"] = managed_model
             # An explicit `--model` is the user's own choice and outranks everything above (managed
             # default, smart-routing pick). Non-claude agents take it as the resolved model, which
             # Codex keeps an explicit --model in ctx.args and passes it to its CLI verbatim.
