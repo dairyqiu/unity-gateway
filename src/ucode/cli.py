@@ -1980,9 +1980,12 @@ def _launch_options(
     explicit_prompt: bool,
     model: str | None,
     provider: str | None,
+    claude_launch_model: str | None = None,
 ) -> LaunchOptions:
     return LaunchOptions(
-        claude_launch_model=model if tool == "claude" and provider is None else None,
+        claude_launch_model=(claude_launch_model or model)
+        if tool == "claude" and provider is None
+        else None,
         launch_smart_routing=(
             # Smart routing is enabled globally.
             smart_routing_enabled
@@ -2329,8 +2332,11 @@ def _launch_tool(
             ctx.args,
             smart_routing_enabled=smart_routing_enabled,
             explicit_prompt=explicit_prompt,
-            model=model or (route_root_model if tool == "claude" else None),
+            # Only a developer's explicit model disables routing. A managed default is the
+            # initial/fallback model and still participates in a routed Claude session.
+            model=model,
             provider=provider,
+            claude_launch_model=model or (route_root_model if tool == "claude" else None),
         )
         print_success(f"Starting {TOOL_SPECS[tool]['display']}")
         with _managed_smart_routing_environment(managed, tool):

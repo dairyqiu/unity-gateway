@@ -643,6 +643,20 @@ class TestSubcommandRouting:
 
         assert options.launch_smart_routing is expected
 
+    def test_claude_managed_default_seeds_launch_without_disabling_routing(self):
+        options = cli_mod._launch_options(
+            "claude",
+            [],
+            smart_routing_enabled=True,
+            explicit_prompt=False,
+            model=None,
+            provider=None,
+            claude_launch_model="system.ai.claude-sonnet-4-6",
+        )
+
+        assert options.launch_smart_routing is True
+        assert options.claude_launch_model == "system.ai.claude-sonnet-4-6"
+
     def test_codex_refresh_is_consumed_by_ucode(self):
         with patch("ucode.cli._launch_tool") as mock_launch:
             result = runner.invoke(app, ["codex", "--refresh"])
