@@ -556,8 +556,8 @@ class TestSubcommandRouting:
             tool_args,
             smart_routing_enabled=True,
             explicit_prompt=explicit_prompt,
-            user_specified_model=model,
-            managed_default_model=None,
+            user_pinned_model=model,
+            settings_default_model=None,
             provider=provider,
         )
 
@@ -599,8 +599,8 @@ class TestSubcommandRouting:
             [],
             smart_routing_enabled=enabled,
             explicit_prompt=False,
-            user_specified_model=None,
-            managed_default_model=None,
+            user_pinned_model=None,
+            settings_default_model=None,
             provider=None,
         )
 
@@ -624,8 +624,8 @@ class TestSubcommandRouting:
             tool_args,
             smart_routing_enabled=True,
             explicit_prompt=False,
-            user_specified_model=None,
-            managed_default_model=None,
+            user_pinned_model=None,
+            settings_default_model=None,
             provider=None,
         )
 
@@ -637,8 +637,8 @@ class TestSubcommandRouting:
             [],
             smart_routing_enabled=True,
             explicit_prompt=False,
-            user_specified_model=None,
-            managed_default_model="system.ai.claude-sonnet-4-6",
+            user_pinned_model=None,
+            settings_default_model="system.ai.claude-sonnet-4-6",
             provider=None,
         )
 
@@ -647,8 +647,8 @@ class TestSubcommandRouting:
 
     def test_user_model_wins_over_managed_default(self):
         options = cli_mod.LaunchOptions(
-            user_specified_model="user-model",
-            managed_default_model="managed-model",
+            user_pinned_model="user-model",
+            settings_default_model="settings-model",
         )
 
         assert options.launch_model == "user-model"
