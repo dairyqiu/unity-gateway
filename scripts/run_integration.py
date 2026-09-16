@@ -19,6 +19,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -39,16 +40,26 @@ def mint_m2m_token(workspace: str, client_id: str, client_secret: str) -> str:
     body = urllib.parse.urlencode(
         {"grant_type": "client_credentials", "scope": "all-apis"}
     ).encode()
+    url = f"{workspace.rstrip('/')}/oidc/v1/token"
     request = urllib.request.Request(
-        f"{workspace.rstrip('/')}/oidc/v1/token",
+        url,
         data=body,
         headers={
             "Authorization": f"Basic {basic}",
             "Content-Type": "application/x-www-form-urlencoded",
         },
     )
-    with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310 (https workspace URL)
-        token = json.load(response).get("access_token", "")
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310 (https URL)
+            token = json.load(response).get("access_token", "")
+    except urllib.error.HTTPError as exc:
+        # Surface the status, the responder (Server header points at an edge/WAF vs the workspace),
+        # and the body so a 403/401 names its real cause instead of a bare "Forbidden".
+        detail = exc.read()[:500].decode("utf-8", "replace")
+        server = exc.headers.get("Server", "?")
+        raise RuntimeError(
+            f"Token mint to {url} failed: HTTP {exc.code} (Server: {server}) body={detail!r}"
+        ) from exc
     if not token:
         raise RuntimeError("Service-principal client credentials returned no access token.")
     return token

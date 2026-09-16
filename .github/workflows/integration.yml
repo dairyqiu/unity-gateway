@@ -219,11 +219,11 @@ jobs:
       - name: Run the managed cases against the managed e2e workspace
         shell: bash
         env:
-          # The managed workspace authenticates as a service principal; the runner mints a
-          # short-lived token from these standard Databricks client-credential variables.
+          # The managed workspace RBAC-denies OAuth token minting from CI runners, so use a
+          # long-lived service-principal token directly (like the existing e2e workspace's bearer)
+          # rather than minting one on the runner.
           UCODE_TEST_WORKSPACE: ${{ secrets.E2E_ADMIN_WORKSPACE }}
-          DATABRICKS_CLIENT_ID: ${{ secrets.E2E_ADMIN_SP_CLIENT_ID }}
-          DATABRICKS_CLIENT_SECRET: ${{ secrets.E2E_ADMIN_SP_CLIENT_SECRET }}
+          DATABRICKS_BEARER: ${{ secrets.E2E_ADMIN_BEARER }}
         run: |
           case "$AGENT" in
             claude) args=(--claude-version "$CLAUDE_VERSION") ;;
