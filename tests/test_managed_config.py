@@ -50,6 +50,7 @@ RAW_MANIFEST = {
                     "default_haiku_model": "system.ai.claude-haiku-4-5",
                 },
                 "smart_routing": {"enabled": True},
+                "tracing": {"enabled": True},
                 "http_headers": {"x-databricks-workspace": "eng-ml-inference"},
             },
         },
@@ -98,6 +99,27 @@ class TestNormalize:
     def test_smart_routing_maps_to_agent_switch(self):
         claude = normalize_managed_config(RAW_MANIFEST)["enabled_agents"]["claude"]
         assert claude["smart_routing_enabled"] is True
+
+    def test_per_agent_tracing_enabled_is_carried(self):
+        claude = normalize_managed_config(RAW_MANIFEST)["enabled_agents"]["claude"]
+        assert claude["otel_tracing_enabled"] is True
+
+    def test_per_agent_tracing_disabled_is_carried(self):
+        raw = {
+            "enabled_agents": [
+                {
+                    "agent": "CODING_AGENT_CODEX",
+                    "config": {"tracing": {"enabled": False}},
+                }
+            ]
+        }
+        codex = normalize_managed_config(raw)["enabled_agents"]["codex"]
+        assert codex["otel_tracing_enabled"] is False
+
+    def test_workspace_level_tracing_is_ignored(self):
+        assert "otel_tracing_enabled" not in normalize_managed_config(
+            {"tracing": {"enabled": True}}
+        )
 
     def test_static_model_services_are_carried(self):
         claude = normalize_managed_config(RAW_MANIFEST)["enabled_agents"]["claude"]
