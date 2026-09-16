@@ -2738,12 +2738,13 @@ def claude_desktop_cmd(
             "skips model discovery; e.g. --model claude-opus-4-8 --model claude-sonnet-4-5.",
         ),
     ] = None,
-    open_app: Annotated[
+    restart_if_running: Annotated[
         bool,
         typer.Option(
-            "--open/--no-open",
-            help="(Re)launch Claude Desktop so it picks up the config (macOS). Use --no-open to "
-            "open it yourself.",
+            "--restart/--no-restart",
+            help="Restart Claude Desktop if it's already running so it picks up the config "
+            "(macOS). A closed Desktop is always launched; use --no-restart to leave a running "
+            "instance alone and quit/reopen it yourself.",
         ),
     ] = True,
 ) -> None:
@@ -2765,7 +2766,7 @@ def claude_desktop_cmd(
             resolved_profile,
             provider=provider,
             models=models,
-            open_app=open_app,
+            restart_if_running=restart_if_running,
         )
     except RuntimeError as exc:
         print_err(str(exc))

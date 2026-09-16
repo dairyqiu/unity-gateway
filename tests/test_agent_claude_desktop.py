@@ -167,27 +167,64 @@ class TestResolveAnthropicOauth:
             claude_desktop._resolve_anthropic_oauth()
 
 
-class TestRelaunchDesktop:
-    def test_macos_launches_by_bundle_id(self, monkeypatch):
-        monkeypatch.setattr(claude_desktop, "current_os", lambda: OS.MACOS)
-        calls: list = []
+class TestOpenDesktop:
+    @staticmethod
+    def _fake_run_factory(calls: list, running: bool):
+        # Command-aware so a `quit` flips the running state — the post-quit wait loop
+        # then breaks immediately instead of sleeping through all 40 iterations.
+        state = {"running": running}
 
         def _fake_run(cmd, *_a, **_k):
             calls.append(cmd)
-            # The "is running" probe returns false so we skip the quit path.
-            return subprocess.CompletedProcess(cmd, 0, stdout="false", stderr="")
+            joined = " ".join(cmd)
+            if "quit app id" in joined:
+                state["running"] = False
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            if "is running" in joined:
+                probe = "true" if state["running"] else "false"
+                return subprocess.CompletedProcess(cmd, 0, stdout=probe, stderr="")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-        monkeypatch.setattr(subprocess, "run", _fake_run)
-        claude_desktop.relaunch_desktop_app()
+        return _fake_run
+
+    def test_macos_launches_closed_app_by_bundle_id(self, monkeypatch):
+        monkeypatch.setattr(claude_desktop, "current_os", lambda: OS.MACOS)
+        calls: list = []
+        monkeypatch.setattr(subprocess, "run", self._fake_run_factory(calls, running=False))
+        claude_desktop.open_desktop_app(restart_if_running=True)
         assert ["open", "-b", claude_desktop._APP_BUNDLE_ID] in calls
 
-    def test_native_linux_warns_and_launches_nothing(self, monkeypatch):
+    def test_macos_opens_closed_app_even_without_restart(self, monkeypatch):
+        # A closed app is harmless to launch, so --no-restart still opens it.
+        monkeypatch.setattr(claude_desktop, "current_os", lambda: OS.MACOS)
+        calls: list = []
+        monkeypatch.setattr(subprocess, "run", self._fake_run_factory(calls, running=False))
+        claude_desktop.open_desktop_app(restart_if_running=False)
+        assert ["open", "-b", claude_desktop._APP_BUNDLE_ID] in calls
+
+    def test_macos_running_app_not_restarted_without_flag(self, monkeypatch):
+        # A running app is left alone under --no-restart: no quit, no relaunch.
+        monkeypatch.setattr(claude_desktop, "current_os", lambda: OS.MACOS)
+        calls: list = []
+        monkeypatch.setattr(subprocess, "run", self._fake_run_factory(calls, running=True))
+        claude_desktop.open_desktop_app(restart_if_running=False)
+        assert ["open", "-b", claude_desktop._APP_BUNDLE_ID] not in calls
+        assert not any("quit app id" in " ".join(c) for c in calls)
+
+    def test_macos_running_app_restarted_with_flag(self, monkeypatch):
+        monkeypatch.setattr(claude_desktop, "current_os", lambda: OS.MACOS)
+        calls: list = []
+        monkeypatch.setattr(subprocess, "run", self._fake_run_factory(calls, running=True))
+        claude_desktop.open_desktop_app(restart_if_running=True)
+        assert any("quit app id" in " ".join(c) for c in calls)  # force-quit
+        assert ["open", "-b", claude_desktop._APP_BUNDLE_ID] in calls  # then reopen
+
+    def test_non_macos_warns_and_launches_nothing(self, monkeypatch):
         monkeypatch.setattr(claude_desktop, "current_os", lambda: OS.LINUX)
-        monkeypatch.setattr(claude_desktop, "_is_wsl", lambda: False)
         calls: list = []
         monkeypatch.setattr(subprocess, "run", lambda *a, **k: calls.append(a))
-        claude_desktop.relaunch_desktop_app()  # must not raise
-        assert calls == []  # no Desktop on Linux → nothing launched
+        claude_desktop.open_desktop_app(restart_if_running=True)  # must not raise
+        assert calls == []  # non-macOS → nothing launched, manual guidance only
 
 
 class TestEnsureDatabricksSession:

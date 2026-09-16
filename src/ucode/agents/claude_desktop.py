@@ -140,17 +140,6 @@ def render_config(base_url: str, models: list[str]) -> dict:
     return config
 
 
-def _is_wsl() -> bool:
-    """True when running under WSL (where 'Linux' is a shell on Windows and the
-    Desktop app is the Windows one)."""
-    if os.environ.get("WSL_DISTRO_NAME"):
-        return True
-    try:
-        return "microsoft" in Path("/proc/version").read_text().lower()
-    except OSError:
-        return False
-
-
 def _macos_app_is_running() -> bool:
     result = subprocess.run(
         ["osascript", "-e", f'application id "{_APP_BUNDLE_ID}" is running'],
@@ -162,45 +151,41 @@ def _macos_app_is_running() -> bool:
     return result.stdout.strip() == "true"
 
 
-def relaunch_desktop_app() -> None:
-    """(Re)launch Claude Desktop so it re-reads the freshly-written config.
+def open_desktop_app(restart_if_running: bool) -> None:
+    """Open Claude Desktop so it re-reads the freshly-written config.
 
-    Desktop only reads ``configLibrary/`` at startup, so a running instance is
-    gracefully quit (a normal Quit event — the app still gets to save/prompt) and
-    reopened. macOS is implemented and verified; Windows and WSL need a real box to
-    validate their launch path, and native Linux has no Desktop app at all, so those
-    print manual guidance instead of guessing.
+    Desktop reads ``configLibrary/`` only at startup. Launching a closed app is
+    harmless, so we always do that. A *running* app must be quit and reopened to
+    pick up the config, which interrupts the GUI (unsaved state, prompts) — so that
+    force-restart happens only when ``restart_if_running`` is set; otherwise we leave
+    it running and print manual guidance. Auto-launch is macOS-only; elsewhere ug
+    prints manual guidance rather than guess at an unvalidated launch path.
     """
-    system = current_os()
-    if system is OS.MACOS:
-        if _macos_app_is_running():
-            print_note("Restarting Claude Desktop to pick up the config...")
-            subprocess.run(
-                ["osascript", "-e", f'quit app id "{_APP_BUNDLE_ID}"'], check=False, timeout=30
+    if current_os() is not OS.MACOS:
+        print_warning(
+            "Auto-launch is only supported on macOS — open or restart Claude Desktop "
+            "manually to pick up the config."
+        )
+        return
+    if _macos_app_is_running():
+        if not restart_if_running:
+            print_note(
+                "Claude Desktop is already running; fully quit it (Cmd-Q) and reopen to pick up "
+                "the config — it reads the config only at startup. (Pass --restart to have ug do "
+                "this for you.)"
             )
-            for _ in range(40):  # wait for exit before relaunching
-                if not _macos_app_is_running():
-                    break
-                time.sleep(0.25)
-        else:
-            print_note("Launching Claude Desktop...")
-        subprocess.run(["open", "-b", _APP_BUNDLE_ID], check=False, timeout=30)
-        return
-    if _is_wsl():
-        print_warning(
-            "Auto-launch under WSL isn't wired up yet (the Desktop app is the Windows one). "
-            "Open or restart Claude Desktop on Windows to pick up the config."
+            return
+        print_note("Restarting Claude Desktop to pick up the config...")
+        subprocess.run(
+            ["osascript", "-e", f'quit app id "{_APP_BUNDLE_ID}"'], check=False, timeout=30
         )
-        return
-    if system is OS.WINDOWS:
-        print_warning(
-            "Auto-launch on Windows isn't wired up yet — open or restart Claude Desktop manually."
-        )
-        return
-    print_warning(
-        "Claude Desktop isn't available on Linux; run `ug claude-desktop` on the Mac or Windows "
-        "machine where Desktop is installed."
-    )
+        for _ in range(40):  # wait for exit before relaunching
+            if not _macos_app_is_running():
+                break
+            time.sleep(0.25)
+    else:
+        print_note("Launching Claude Desktop...")
+    subprocess.run(["open", "-b", _APP_BUNDLE_ID], check=False, timeout=30)
 
 
 def _resolve_anthropic_oauth() -> str:
@@ -280,13 +265,15 @@ def launch(
     profile: str | None,
     provider: str,
     models: list[str] | None = None,
-    open_app: bool = True,
+    restart_if_running: bool = True,
 ) -> None:
     """Configure Claude Desktop for ``provider`` and run the refresh proxy.
 
     Blocks until interrupted: the proxy must outlive the call, since Desktop is a
-    separate long-lived GUI process (not a child we exec). When ``open_app`` is set
-    (the default), (re)launch Desktop so it picks up the config with no manual step.
+    separate long-lived GUI process (not a child we exec). A closed Desktop is always
+    launched; a running one is restarted to pick up the config only when
+    ``restart_if_running`` is set (the default), otherwise left alone with manual
+    guidance.
     """
     anthropic_oauth = _resolve_anthropic_oauth()
     _ensure_databricks_session(workspace, profile)
@@ -318,13 +305,7 @@ def launch(
 
     print_success(f"Gateway refresh proxy running at {base_url}")
     print_note(f"Registered + applied the '{_ENTRY_NAME}' gateway config.\nConfig: {path}")
-    if open_app:
-        relaunch_desktop_app()
-    else:
-        print_note(
-            "Fully quit Claude Desktop (Cmd-Q) and reopen it to pick up the config — it reads "
-            "the config only at startup. (Pass --open to have ug (re)launch it for you.)"
-        )
+    open_desktop_app(restart_if_running=restart_if_running)
     print_note("Keep this command running while you use Desktop; closing it stops the proxy.")
     try:
         # serve_forever() unwinds only on shutdown()/KeyboardInterrupt, not on stray
