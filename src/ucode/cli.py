@@ -43,7 +43,11 @@ from ucode.agents.args import has_explicit_model_arg
 from ucode.agents.codex import revert_legacy_shared_config
 from ucode.agents.pi import PI_SETTINGS_BACKUP_PATH, PI_SETTINGS_PATH
 from ucode.config_io import is_dry_run, restore_file, set_dry_run
-from ucode.constants import CODEX_SCOPED_MODEL_DISCOVERY_STATE_KEY, MODEL_DISCOVERY_ENV_VAR
+from ucode.constants import (
+    CLAUDE_SCOPED_MODEL_DISCOVERY_STATE_KEY,
+    CODEX_SCOPED_MODEL_DISCOVERY_STATE_KEY,
+    scoped_model_discovery_enabled,
+)
 from ucode.databricks import (
     apply_pat_environment,
     build_shared_base_urls,
@@ -2188,12 +2192,6 @@ def _launch_tool(
             raise RuntimeError("--provider and --parent cannot be used together.")
         scoped_model_source = bool(provider or parent_schema)
         scoped_model_discovery = _scoped_model_discovery_enabled(force=managed_provider is not None)
-        if tool == "claude" and scoped_model_source:
-            if scoped_model_discovery:
-                os.environ[claude_agent.GATEWAY_MODEL_DISCOVERY_ENV_VAR] = "1"
-            else:
-                os.environ.pop(claude_agent.GATEWAY_MODEL_DISCOVERY_ENV_VAR, None)
-                os.environ.pop("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", None)
         # Checked after the managed config settles `provider`: an admin-set provider must trip this
         # guard too, or routing would be persisted as on while a provider is active.
         if tool in CAN_USE_CACHED_CONFIG_AGENTS and smart_routing_enabled and provider:
@@ -2337,6 +2335,10 @@ def _launch_tool(
         if tool == "claude":
             if provider:
                 state["_claude_launch_provider"] = provider
+            elif parent_schema:
+                state["_claude_launch_parent_schema"] = parent_schema
+            if scoped_model_source:
+                state[CLAUDE_SCOPED_MODEL_DISCOVERY_STATE_KEY] = scoped_model_discovery
         elif tool == "codex":
             if scoped_model_source:
                 state[CODEX_SCOPED_MODEL_DISCOVERY_STATE_KEY] = scoped_model_discovery
@@ -2536,7 +2538,7 @@ def _scoped_model_discovery_enabled(*, force: bool = False) -> bool:
     ``system.ai`` models. A managed source may force discovery because workspace
     policy outranks a developer environment variable.
     """
-    return force or os.environ.get(MODEL_DISCOVERY_ENV_VAR) != "0"
+    return scoped_model_discovery_enabled(force=force)
 
 
 @app.command(
@@ -2722,26 +2724,25 @@ def claude_cmd(
         claude_agent.disable_smart_routing(load_state())
         print_success("Claude Code smart routing disabled; ug routing hooks removed")
         return
-    if enable_model_discovery or (
-        (provider is not None or parent is not None) and _scoped_model_discovery_enabled()
-    ):
-        os.environ[claude_agent.GATEWAY_MODEL_DISCOVERY_ENV_VAR] = "1"
+    requested_discovery: bool | None = None
+    if enable_model_discovery:
+        requested_discovery = True
     elif provider is not None or parent is not None:
-        os.environ.pop(claude_agent.GATEWAY_MODEL_DISCOVERY_ENV_VAR, None)
-        os.environ.pop("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", None)
-    with _smart_routing_v2_flag(enable_smart_routing_flag):
-        with _disable_smart_routing_for_subcommand("claude", ctx):
-            _launch_tool(
-                "claude",
-                ctx,
-                provider=provider,
-                model=model,
-                refresh=refresh,
-                skip_preflight=skip_preflight,
-                workspace_url=workspace,
-                parent_schema=parent,
-                custom_oauth=custom_oauth,
-            )
+        requested_discovery = _scoped_model_discovery_enabled()
+    with claude_agent.launch_discovery_environment(requested_discovery):
+        with _smart_routing_v2_flag(enable_smart_routing_flag):
+            with _disable_smart_routing_for_subcommand("claude", ctx):
+                _launch_tool(
+                    "claude",
+                    ctx,
+                    provider=provider,
+                    model=model,
+                    refresh=refresh,
+                    skip_preflight=skip_preflight,
+                    workspace_url=workspace,
+                    parent_schema=parent,
+                    custom_oauth=custom_oauth,
+                )
 
 
 @app.command("gemini", context_settings={"allow_extra_args": True, "ignore_unknown_options": True})
