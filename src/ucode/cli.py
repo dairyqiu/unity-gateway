@@ -1982,6 +1982,7 @@ def _launch_options(
     provider: str | None,
 ) -> LaunchOptions:
     return LaunchOptions(
+        # Pinned models for providers are resolved above through the provider-specific launch path.
         user_pinned_model=user_pinned_model if provider is None else None,
         launch_smart_routing=(
             # Smart routing is enabled globally.
