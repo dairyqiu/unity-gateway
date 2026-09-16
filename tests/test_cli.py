@@ -562,6 +562,32 @@ class TestSubcommandRouting:
 
         assert options.launch_smart_routing is expected
 
+    @pytest.mark.parametrize("tool", ["claude", "codex"])
+    def test_managed_smart_routing_environment_is_session_scoped(self, monkeypatch, tool):
+        monkeypatch.delenv("SMART_ROUTING_V2_ENABLED", raising=False)
+        managed = {
+            "enabled_agents": {
+                tool: {"smart_routing_enabled": True},
+            }
+        }
+
+        with cli_mod._managed_smart_routing_environment(managed, tool):
+            assert os.environ["SMART_ROUTING_V2_ENABLED"] == "1"
+
+        assert "SMART_ROUTING_V2_ENABLED" not in os.environ
+
+    def test_managed_smart_routing_only_applies_to_selected_agent(self, monkeypatch):
+        monkeypatch.delenv("SMART_ROUTING_V2_ENABLED", raising=False)
+        managed = {
+            "enabled_agents": {
+                "claude": {"smart_routing_enabled": True},
+                "codex": {},
+            }
+        }
+
+        with cli_mod._managed_smart_routing_environment(managed, "codex"):
+            assert "SMART_ROUTING_V2_ENABLED" not in os.environ
+
     @pytest.mark.parametrize(
         ("tool_args", "expected"),
         [

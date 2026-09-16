@@ -139,22 +139,30 @@ class AgentConfig:
 
     http_headers: dict[str, str] | None = None
     models: AgentModels | None = None
+    smart_routing_enabled: bool = False
 
     @classmethod
     def from_wire(cls, config: object) -> AgentConfig:
         """Parse wire format AgentConfig into normalized AgentConfig."""
         config_dict = _as_dict(config)
         headers = _clean_str_dict(config_dict.get("http_headers"))
+        smart_routing = _as_dict(config_dict.get("smart_routing"))
         agent_models = AgentModels.from_wire(
             config_dict.get("default_models"), config_dict.get("models")
         )
-        return cls(http_headers=headers or None, models=agent_models)
+        return cls(
+            http_headers=headers or None,
+            models=agent_models,
+            smart_routing_enabled=smart_routing.get("enabled") is True,
+        )
 
     def to_internal(self) -> dict:
         """Convert to internal shape for enabled_agents dict."""
         result: dict = {}
         if self.http_headers:
             result["http_headers"] = self.http_headers
+        if self.smart_routing_enabled:
+            result["smart_routing_enabled"] = True
         model_config = self.models.to_internal() if self.models else None
         if model_config is not None:
             result["model_config"] = model_config

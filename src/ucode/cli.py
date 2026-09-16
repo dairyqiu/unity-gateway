@@ -2001,6 +2001,26 @@ def _launch_options(
     )
 
 
+@contextmanager
+def _managed_smart_routing_environment(managed: dict | None, tool: str) -> Iterator[None]:
+    """Expose an agent's managed smart-routing switch only to its launched session."""
+    agent_config = ((managed or {}).get("enabled_agents") or {}).get(tool) or {}
+    if agent_config.get("smart_routing_enabled") is not True:
+        yield
+        return
+
+    name = "SMART_ROUTING_V2_ENABLED"
+    previous = os.environ.get(name)
+    os.environ[name] = "1"
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = previous
+
+
 def _launch_tool(
     tool_name: str,
     ctx: typer.Context,
@@ -2283,7 +2303,8 @@ def _launch_tool(
             provider=provider,
         )
         print_success(f"Starting {TOOL_SPECS[tool]['display']}")
-        launch_agent(tool, state, ctx.args, options=launch_options)
+        with _managed_smart_routing_environment(managed, tool):
+            launch_agent(tool, state, ctx.args, options=launch_options)
     except RuntimeError as exc:
         print_err(str(exc))
         raise typer.Exit(1) from None
