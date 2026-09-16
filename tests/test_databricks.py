@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import time
 from decimal import Decimal
 from urllib.parse import parse_qs
 
@@ -1238,6 +1239,71 @@ class TestListMcpServices:
         assert reason and reason.startswith("HTTP 404")
 
 
+class TestWalkCatalogSchemas:
+    """The generic catalogs -> schemas -> per-schema probe scaffold, independent of any probe."""
+
+    def _fake_catalog_http(self, catalogs, schemas_by_catalog):
+        def fake_get(url, token, timeout=30):
+            if "unity-catalog/catalogs" in url:
+                return {"catalogs": [{"name": c} for c in catalogs]}, None
+            if "unity-catalog/schemas" in url:
+                cat = url.split("catalog_name=")[1].split("&")[0]
+                return {"schemas": [{"name": s} for s in schemas_by_catalog.get(cat, [])]}, None
+            return None, "unexpected url"
+
+        return fake_get
+
+    def test_probes_each_user_schema_and_reports_progress(self, monkeypatch):
+        monkeypatch.setattr(
+            db_mod,
+            "_http_get_json",
+            self._fake_catalog_http(
+                catalogs=["mycat", "system"],
+                schemas_by_catalog={"mycat": ["a", "b", "information_schema"]},
+            ),
+        )
+        probed: list[tuple[str, str]] = []
+        collected: list[tuple[str, int, int]] = []
+
+        def probe(catalog, schema):
+            probed.append((catalog, schema))
+            return f"{catalog}.{schema}"
+
+        def collect(result, done, total):
+            collected.append((result, done, total))
+
+        reason = db_mod.walk_catalog_schemas(
+            WS, "token", deadline=time.monotonic() + 30, probe=probe, collect=collect
+        )
+
+        assert reason is None
+        # system is skipped and information_schema is dropped; only user schemas are probed.
+        assert sorted(probed) == [("mycat", "a"), ("mycat", "b")]
+        assert sorted(r for r, _, _ in collected) == ["mycat.a", "mycat.b"]
+        # One collect per probed schema; total is fixed and done climbs to it.
+        assert [total for _, _, total in collected] == [2, 2]
+        assert sorted(done for _, done, _ in collected) == [1, 2]
+
+    def test_returns_reason_when_all_catalogs_skipped(self, monkeypatch):
+        monkeypatch.setattr(
+            db_mod,
+            "_http_get_json",
+            self._fake_catalog_http(catalogs=["system", "samples"], schemas_by_catalog={}),
+        )
+        probed: list[tuple[str, str]] = []
+
+        reason = db_mod.walk_catalog_schemas(
+            WS,
+            "token",
+            deadline=time.monotonic() + 30,
+            probe=lambda catalog, schema: probed.append((catalog, schema)),
+            collect=lambda *args: None,
+        )
+
+        assert reason == "no user UC catalogs found"
+        assert probed == []
+
+
 class TestListAllMcpServices:
     """Workspace-wide walk: catalogs -> schemas -> per-schema mcp-services."""
 
@@ -1514,12 +1580,33 @@ class TestApplyPatEnvironment:
         assert os.environ["DATABRICKS_BEARER"] == "explicit-bearer"
 
 
+class TestUgBinary:
+    @pytest.mark.parametrize("resolved", ["/tools with spaces/ug", r"C:\Tools with spaces\ug.exe"])
+    def test_resolves_canonical_command_even_when_invoked_as_ucode(self, monkeypatch, resolved):
+        requested = []
+
+        def which(command):
+            requested.append(command)
+            return resolved
+
+        monkeypatch.setattr(db_mod.shutil, "which", which)
+        monkeypatch.setattr("sys.argv", ["ucode", "configure"])
+
+        assert db_mod.ug_binary() == resolved
+        assert requested == ["ug"]
+
+    def test_falls_back_to_ug_without_path_entry(self, monkeypatch):
+        monkeypatch.setattr(db_mod.shutil, "which", lambda command: None)
+        assert db_mod.ug_binary() == "ug"
+
+
 class TestBuildAuthTokenArgv:
-    def test_basic_argv(self):
+    def test_basic_argv(self, monkeypatch):
+        monkeypatch.setattr(db_mod.shutil, "which", lambda command: f"/tools/{command}")
         argv = build_auth_token_argv(WS)
-        # First element resolves to the ucode executable; the rest is the
+        # First element resolves to the ug executable; the rest is the
         # cross-platform helper invocation — no `sh`, no `jq`, no shell syntax.
-        assert argv[0].endswith("ucode") or argv[0] == "ucode"
+        assert argv[0] == "/tools/ug"
         assert argv[1:] == ["auth-token", "--host", WS]
 
     def test_strips_trailing_slash_from_host(self):
@@ -1550,8 +1637,8 @@ class TestBuildAuthShellCommand:
         cmd = build_auth_shell_command(WS)
         assert WS in cmd
 
-    def test_is_ucode_auth_token_invocation(self):
-        # The persisted helper now points at the `ucode auth-token` executable
+    def test_is_ug_auth_token_invocation(self):
+        # The persisted helper points at the `ug auth-token` executable
         # on every platform — not a POSIX `databricks ... | jq` pipeline.
         cmd = build_auth_shell_command(WS)
         assert "auth-token" in cmd
@@ -1559,6 +1646,15 @@ class TestBuildAuthShellCommand:
         # POSIX-only constructs that broke Windows (#116) must be gone.
         assert "jq" not in cmd
         assert "if [ -n" not in cmd
+
+    def test_windows_quotes_ug_path_with_spaces(self, monkeypatch):
+        executable = r"C:\Program Files\Unity Gateway\ug.exe"
+        monkeypatch.setattr(db_mod.shutil, "which", lambda command: executable)
+        monkeypatch.setattr(db_mod.platform, "system", lambda: "Windows")
+
+        assert build_auth_shell_command(WS, "my profile") == (
+            f'"{executable}" auth-token --host {WS} --profile "my profile"'
+        )
 
     def test_embeds_profile_when_provided(self):
         cmd = build_auth_shell_command(WS, profile="stablebox")
