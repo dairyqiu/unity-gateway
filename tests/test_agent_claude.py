@@ -1494,13 +1494,9 @@ class TestClaudeLaunch:
         monkeypatch.setattr(claude, "exec_or_spawn", lambda argv: calls.append(argv))
 
         claude.launch(
-            {
-                "workspace": WS,
-                "profile": "test",
-                "_claude_launch_model": "cat.schema.model",
-            },
+            {"workspace": WS, "profile": "test"},
             [],
-            options=LaunchOptions(),
+            options=LaunchOptions(claude_launch_model="cat.schema.model"),
         )
 
         assert os.environ["ANTHROPIC_MODEL"] == "cat.schema.model"
