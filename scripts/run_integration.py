@@ -101,6 +101,11 @@ def arguments():
         help="Existing Anthropic MPS selected in the configure CUJ.",
     )
     parser.add_argument(
+        "--claude-provider-model",
+        default="claude-haiku-4-5-20251001",
+        help="Only model exposed by the Anthropic MPS discovery fixture.",
+    )
+    parser.add_argument(
         "--codex-provider",
         default="main.ucode.ci_openai_mps",
         help="Existing OpenAI MPS selected in the configure CUJ.",
@@ -109,6 +114,21 @@ def arguments():
         "--codex-provider-model",
         default="gpt-5-nano",
         help="Model allowed by the OpenAI MPS selected in the configure CUJ.",
+    )
+    parser.add_argument(
+        "--parent-schema",
+        default="main.ucode",
+        help="Schema containing the dedicated model-discovery Model Services.",
+    )
+    parser.add_argument(
+        "--claude-parent-model",
+        default="main.ucode.ci_e2e_claude",
+        help="Claude-compatible Model Service in --parent-schema.",
+    )
+    parser.add_argument(
+        "--codex-parent-model",
+        default="main.ucode.ci_e2e_codex",
+        help="Codex-compatible Model Service in --parent-schema.",
     )
     parser.add_argument("--python", default=sys.executable, help="Python 3.12+ path or uv version.")
     parser.add_argument("--dependency", action="append", default=[], metavar="PACKAGE==VERSION")
@@ -278,8 +298,12 @@ def main() -> int:
             "claude_model": args.claude_model,
             "codex_model": args.codex_model,
             "claude_provider": args.claude_provider,
+            "claude_provider_model": args.claude_provider_model,
             "codex_provider": args.codex_provider,
             "codex_provider_model": args.codex_provider_model,
+            "parent_schema": args.parent_schema,
+            "claude_parent_model": args.claude_parent_model,
+            "codex_parent_model": args.codex_parent_model,
             "dependencies": args.dependency,
             "workspace": args.workspace,
         },
@@ -516,8 +540,12 @@ def main() -> int:
                 "UG_INTEGRATION_RUN_DIR": str(output),
                 "UG_INTEGRATION_AGENTS": ",".join(agents),
                 "UG_INTEGRATION_CLAUDE_PROVIDER": args.claude_provider,
+                "UG_INTEGRATION_CLAUDE_PROVIDER_MODEL": args.claude_provider_model,
                 "UG_INTEGRATION_CODEX_PROVIDER": args.codex_provider,
                 "UG_INTEGRATION_CODEX_PROVIDER_MODEL": args.codex_provider_model,
+                "UG_INTEGRATION_PARENT_SCHEMA": args.parent_schema,
+                "UG_INTEGRATION_CLAUDE_PARENT_MODEL": args.claude_parent_model,
+                "UG_INTEGRATION_CODEX_PARENT_MODEL": args.codex_parent_model,
                 "UCODE_TEST_WORKSPACE": args.workspace or "",
                 "DATABRICKS_BEARER": bearer,
             }
