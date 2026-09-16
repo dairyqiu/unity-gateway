@@ -81,6 +81,11 @@ ug codex --full-auto
 
 All agents route through Databricks AI Gateway using your workspace credentials — no API keys required.
 
+Claude and Codex refresh the model picker from the selected Model Provider Service or Unity
+Catalog location on each scoped launch. Set `UG_ENABLE_MODEL_DISCOVERY=0` to keep the routing
+header while using the agent's native picker catalog instead. This switch does not disable normal
+Databricks `system.ai` model discovery.
+
 Codex uses the provider ID `Databricks` while keeping the `ucode` profile name.
 Re-run `ug configure --agents codex` to update existing generated configurations.
 This reuses history stored under the exact case-sensitive `Databricks` ID; it does not merge
