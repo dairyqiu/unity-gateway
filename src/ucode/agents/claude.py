@@ -30,6 +30,7 @@ from ucode.constants import (
     MCP_USER_SCOPE,
     MODEL_PROVIDER_SERVICE_HEADER,
     MODEL_SERVICE_PARENT_SCHEMA_HEADER,
+    SMART_ROUTER_RECIPE_HEADER,
 )
 from ucode.custom_oauth import CustomOAuthConfig, build_custom_auth_shell_command
 from ucode.databricks import (
@@ -58,6 +59,7 @@ from ucode.smart_routing.claude_hooks import (
     remove_smart_routing_hooks,
     sync_smart_routing_hooks,
 )
+from ucode.smart_routing.routing import configured_router_name
 from ucode.state import MANAGED_OVERLAY_KEY, is_tool_managed, mark_tool_managed, save_state
 from ucode.telemetry import agent_version, ug_version
 from ucode.tracing import tracing_env
@@ -181,6 +183,7 @@ CLAUDE_MANAGED_CUSTOM_HEADER_NAMES = frozenset(
         "user-agent",
         MODEL_PROVIDER_SERVICE_HEADER.casefold(),
         MODEL_SERVICE_PARENT_SCHEMA_HEADER.casefold(),
+        SMART_ROUTER_RECIPE_HEADER.casefold(),
     }
 )
 CLAUDE_TRACING_STOP_HOOK_SUFFIX = " autolog claude stop-hook"
@@ -379,6 +382,10 @@ def render_overlay(
         header_lines.append(f"{MODEL_PROVIDER_SERVICE_HEADER}: {provider}")
     elif parent_schema:
         header_lines.append(f"{MODEL_SERVICE_PARENT_SCHEMA_HEADER}: {parent_schema}")
+    # Stamp the router recipe on every inference request so the gateway can attribute
+    # traffic to it.
+    if smart_routing_v2.enabled():
+        header_lines.append(f"{SMART_ROUTER_RECIPE_HEADER}: {configured_router_name()}")
     # Relayed: the X-Databricks-AI-Gateway-Token swap header is added per request
     # by the refresh proxy, not here — a static value would go stale mid-session.
     custom_headers = "\n".join(header_lines)
