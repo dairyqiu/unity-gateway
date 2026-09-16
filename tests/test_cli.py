@@ -470,14 +470,14 @@ class TestSubcommandRouting:
         with patch(
             "ucode.cli._launch_tool",
             side_effect=lambda *_args, **_kwargs: enabled_during_launch.append(
-                os.environ.get("ENABLE_SMART_ROUTING_V2")
+                os.environ.get(cli_mod.smart_routing_v2.ENV_VAR)
             ),
         ) as mock_launch:
             result = runner.invoke(app, ["codex", "--enable-smart-routing"])
 
         assert result.exit_code == 0, result.output
         assert enabled_during_launch == ["1"]
-        assert "ENABLE_SMART_ROUTING_V2" not in os.environ
+        assert cli_mod.smart_routing_v2.ENV_VAR not in os.environ
         assert mock_launch.call_args.args[1].args == []
 
     @pytest.mark.parametrize("tool, subcommand", [("codex", "app"), ("claude", "update")])
@@ -490,20 +490,20 @@ class TestSubcommandRouting:
         with patch(
             "ucode.cli._launch_tool",
             side_effect=lambda *_args, **_kwargs: observed.append(
-                os.environ.get("ENABLE_SMART_ROUTING_V2")
+                os.environ.get(cli_mod.smart_routing_v2.ENV_VAR)
             ),
         ):
             result = runner.invoke(app, [tool, subcommand])
 
         assert result.exit_code == 0, result.output
         assert observed == [None]
-        assert os.environ["ENABLE_SMART_ROUTING_V2"] == "1"
+        assert os.environ[cli_mod.smart_routing_v2.ENV_VAR] == "1"
 
     def test_claude_enable_smart_routing_forwards_positional_prompt_to_v2(self):
         captured = []
 
         def capture(_tool, ctx, **_kwargs):
-            captured.append((os.environ.get("ENABLE_SMART_ROUTING_V2"), ctx.args))
+            captured.append((os.environ.get(cli_mod.smart_routing_v2.ENV_VAR), ctx.args))
 
         with patch("ucode.cli._launch_tool", side_effect=capture):
             result = runner.invoke(
@@ -564,7 +564,7 @@ class TestSubcommandRouting:
 
     @pytest.mark.parametrize("tool", ["claude", "codex"])
     def test_managed_smart_routing_environment_is_session_scoped(self, monkeypatch, tool):
-        monkeypatch.delenv("SMART_ROUTING_V2_ENABLED", raising=False)
+        monkeypatch.delenv(cli_mod.smart_routing_v2.ENV_VAR, raising=False)
         managed = {
             "enabled_agents": {
                 tool: {"smart_routing_enabled": True},
@@ -572,12 +572,12 @@ class TestSubcommandRouting:
         }
 
         with cli_mod._managed_smart_routing_environment(managed, tool):
-            assert os.environ["SMART_ROUTING_V2_ENABLED"] == "1"
+            assert os.environ[cli_mod.smart_routing_v2.ENV_VAR] == "1"
 
-        assert "SMART_ROUTING_V2_ENABLED" not in os.environ
+        assert cli_mod.smart_routing_v2.ENV_VAR not in os.environ
 
     def test_managed_smart_routing_only_applies_to_selected_agent(self, monkeypatch):
-        monkeypatch.delenv("SMART_ROUTING_V2_ENABLED", raising=False)
+        monkeypatch.delenv(cli_mod.smart_routing_v2.ENV_VAR, raising=False)
         managed = {
             "enabled_agents": {
                 "claude": {"smart_routing_enabled": True},
@@ -586,7 +586,7 @@ class TestSubcommandRouting:
         }
 
         with cli_mod._managed_smart_routing_environment(managed, "codex"):
-            assert "SMART_ROUTING_V2_ENABLED" not in os.environ
+            assert cli_mod.smart_routing_v2.ENV_VAR not in os.environ
 
     @pytest.mark.parametrize("tool", ["claude", "codex"])
     def test_managed_smart_routing_enables_launch_policy(self, tool):
@@ -1111,8 +1111,7 @@ class TestClaudeModelFlag:
         assert mock_configure.call_args.kwargs["custom_model"] is None
         assert mock_configure.call_args.kwargs["route_root_model"] is None
         assert (
-            mock_launch.call_args.kwargs["options"].user_pinned_model
-            == "cat.schema.claude-opus-5"
+            mock_launch.call_args.kwargs["options"].user_pinned_model == "cat.schema.claude-opus-5"
         )
 
     def test_v2_model_sets_transient_launch_override(self, monkeypatch):

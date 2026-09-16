@@ -1500,7 +1500,9 @@ class TestClaudeLaunch:
         )
 
         assert os.environ["ANTHROPIC_MODEL"] == "cat.schema.model"
-        assert calls == [["claude", "--settings", str(claude.CLAUDE_SETTINGS_PATH)]]
+        assert calls[0][:2] == ["claude", "--settings"]
+        settings = json.loads(calls[0][2])
+        assert settings["env"]["ANTHROPIC_MODEL"] == "cat.schema.model"
 
     @pytest.mark.parametrize(
         "tool_args",

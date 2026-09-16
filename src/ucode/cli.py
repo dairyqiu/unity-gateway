@@ -1652,7 +1652,12 @@ def claude_router_hook_cmd(
             request_first_prompt_route,
         )
 
-        output = first_prompt_hook_output(request_first_prompt_route(Path(socket_path), payload))
+        response = request_first_prompt_route(
+            Path(socket_path),
+            payload,
+            timeout=smart_routing_v2.CLAUDE_ROUTE_SELECTION_TIMEOUT_S + 5.0,
+        )
+        output = first_prompt_hook_output(response)
         if output is not None:
             sys.stdout.write(json.dumps(output))
         return
@@ -1743,15 +1748,11 @@ def _smart_routing_v2_flag(enabled: bool) -> Iterator[None]:
     if not enabled:
         yield
         return
-    previous = os.environ.get(smart_routing_v2.ENV_VAR)
-    os.environ[smart_routing_v2.ENV_VAR] = "1"
+    previous = smart_routing_v2.enable_env()
     try:
         yield
     finally:
-        if previous is None:
-            os.environ.pop(smart_routing_v2.ENV_VAR, None)
-        else:
-            os.environ[smart_routing_v2.ENV_VAR] = previous
+        smart_routing_v2.restore_env(previous)
 
 
 @contextmanager
@@ -1766,12 +1767,11 @@ def _disable_smart_routing_for_subcommand(tool: str, ctx: Any) -> Iterator[None]
     if _smart_routing_launch_shape(tool, ctx.args, _has_explicit_prompt(ctx)):
         yield
         return
-    previous = os.environ.pop(smart_routing_v2.ENV_VAR, None)
+    previous = smart_routing_v2.disable_env()
     try:
         yield
     finally:
-        if previous is not None:
-            os.environ[smart_routing_v2.ENV_VAR] = previous
+        smart_routing_v2.restore_env(previous)
 
 
 def _migrate_legacy_smart_routing(state: dict) -> dict:
@@ -2009,16 +2009,11 @@ def _managed_smart_routing_environment(managed: dict | None, tool: str) -> Itera
         yield
         return
 
-    name = "SMART_ROUTING_V2_ENABLED"
-    previous = os.environ.get(name)
-    os.environ[name] = "1"
+    previous = smart_routing_v2.enable_env()
     try:
         yield
     finally:
-        if previous is None:
-            os.environ.pop(name, None)
-        else:
-            os.environ[name] = previous
+        smart_routing_v2.restore_env(previous)
 
 
 def _managed_smart_routing_enabled(managed: dict | None, tool: str) -> bool:

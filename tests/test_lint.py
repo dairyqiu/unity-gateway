@@ -44,3 +44,16 @@ def test_ty():
         "ty found type errors. Fix with:\n"
         "  uv run ty check src/\n\n" + result.stdout + result.stderr
     )
+
+
+def test_smart_routing_env_var_is_centralized():
+    forbidden = "SMART_ROUTING_V2_ENABLED"
+    offenders = [
+        path
+        for path in (ROOT / "src").rglob("*.py")
+        if forbidden in path.read_text(encoding="utf-8")
+    ]
+
+    assert offenders == [], (
+        f"Use ucode.smart_routing.v2.ENV_VAR/helpers instead of {forbidden}: {offenders}"
+    )

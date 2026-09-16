@@ -1461,9 +1461,16 @@ def launch(
         return
     if workspace:
         os.environ["OAUTH_TOKEN"] = get_databricks_token(workspace, state.get("profile"))
+    settings_override = None
+    launch_args = list(tool_args)
     if options.user_pinned_model:
         os.environ["ANTHROPIC_MODEL"] = options.user_pinned_model
-    exec_or_spawn(_build_claude_argv(binary, tool_args))
+        settings_override = {"env": {"ANTHROPIC_MODEL": options.user_pinned_model}}
+        launch_args = [
+            *_launch_model_args(tool_args, options.user_pinned_model),
+            *tool_args,
+        ]
+    exec_or_spawn(_build_claude_argv(binary, launch_args, settings_override=settings_override))
 
 
 def validate_cmd(binary: str) -> list[str]:
