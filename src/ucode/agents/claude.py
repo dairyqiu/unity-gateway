@@ -1563,6 +1563,7 @@ def _launch_relayed(
         force_refresh_near_expiry=False,
     )
     server_thread = None
+    server_thread_started = False
     try:
         # start_proxy falls back to an OS-assigned port when the cached one is taken
         # (stale proxy from a killed session). Reconcile every port consumer before
@@ -1581,7 +1582,13 @@ def _launch_relayed(
         # serving thread starts. Creating the child first keeps Popen failures on
         # the no-thread cleanup path and avoids BaseServer.shutdown deadlocks.
         server_thread = threading.Thread(target=server.serve_forever, daemon=True)
-        server_thread.start()
+        try:
+            server_thread.start()
+            server_thread_started = True
+        except BaseException:
+            proc.terminate()
+            proc.wait()
+            raise
         try:
             returncode = proc.wait()
         except KeyboardInterrupt:
@@ -1592,7 +1599,7 @@ def _launch_relayed(
             cache.stop()
         finally:
             try:
-                if server_thread is not None:
+                if server_thread is not None and server_thread_started:
                     try:
                         server.shutdown()
                     finally:
@@ -1613,6 +1620,11 @@ def launch(
 ) -> None:
     binary = SPEC["binary"]
     workspace = state.get("workspace")
+    if options.launch_smart_routing and state.get("_claude_launch_parent_schema"):
+        raise RuntimeError(
+            "Claude Code smart routing cannot be used with a model location. "
+            "Disable smart routing or remove the model location and try again."
+        )
     discovery_token = None
     discovery_enabled = bool(workspace and os.environ.get(GATEWAY_MODEL_DISCOVERY_ENV_VAR) == "1")
     if discovery_enabled:

@@ -1571,6 +1571,92 @@ class TestClaudeLaunch:
 
         assert calls == ["cache.stop", "server_close", "client.close"]
 
+    def test_relayed_thread_start_failure_terminates_child_without_server_shutdown(
+        self, monkeypatch
+    ):
+        calls: list[str] = []
+
+        class Server:
+            server_address = ("127.0.0.1", 12345)
+
+            def serve_forever(self):
+                raise AssertionError("serve_forever must not run")
+
+            def shutdown(self):
+                raise AssertionError("shutdown would deadlock before serve_forever starts")
+
+            def server_close(self):
+                calls.append("server_close")
+
+        class Cache:
+            def stop(self):
+                calls.append("cache.stop")
+
+        class Client:
+            def close(self):
+                calls.append("client.close")
+
+        class Process:
+            def terminate(self):
+                calls.append("proc.terminate")
+
+            def wait(self):
+                calls.append("proc.wait")
+                return 1
+
+        class Thread:
+            def start(self):
+                calls.append("thread.start")
+                raise RuntimeError("could not start server thread")
+
+            def join(self):
+                raise AssertionError("an unstarted thread cannot be joined")
+
+        monkeypatch.delenv(claude.GATEWAY_MODEL_DISCOVERY_ENV_VAR, raising=False)
+        monkeypatch.setattr(claude, "_ensure_subscription_login", lambda: None)
+        monkeypatch.setattr(
+            claude.gateway_proxy,
+            "start_proxy",
+            lambda *_args, **_kwargs: (Server(), Cache(), Client()),
+        )
+        monkeypatch.setattr(claude.subprocess, "Popen", lambda *_args, **_kwargs: Process())
+        monkeypatch.setattr(claude.threading, "Thread", lambda **_kwargs: Thread())
+
+        with pytest.raises(RuntimeError, match="could not start server thread"):
+            claude._launch_relayed(
+                {"workspace": WS, "claude_relayed": True, "relayed_proxy_port": 12345},
+                "claude",
+                [],
+            )
+
+        assert calls == [
+            "thread.start",
+            "proc.terminate",
+            "proc.wait",
+            "cache.stop",
+            "server_close",
+            "client.close",
+        ]
+
+    def test_parent_scoped_launch_rejects_smart_routing_before_discovery(self, monkeypatch):
+        monkeypatch.setenv(claude.GATEWAY_MODEL_DISCOVERY_ENV_VAR, "1")
+        refresh = Mock()
+        launch_v2 = Mock()
+        monkeypatch.setattr(claude, "_prime_gateway_models_cache", refresh)
+        monkeypatch.setattr(v2, "launch_claude", launch_v2)
+
+        with pytest.raises(
+            RuntimeError, match="smart routing cannot be used with a model location"
+        ):
+            claude.launch(
+                {"workspace": WS, "_claude_launch_parent_schema": "main.default"},
+                [],
+                options=LaunchOptions(launch_smart_routing=True),
+            )
+
+        refresh.assert_not_called()
+        launch_v2.assert_not_called()
+
     def test_smart_routing_on_windows_is_not_supported(self, monkeypatch):
         monkeypatch.setenv(v2.ENV_VAR, "1")
         monkeypatch.setattr(claude.os, "name", "nt")
