@@ -37,6 +37,18 @@ All tests live directly in `integration/`; shared mechanics live in `utils/`.
 | `test_ug_configure_claude_anthropic_mps` | Select Anthropic MPS in the real configure picker; launch Claude | Saved provider in status; completed TUI file task; normal exit |
 | `test_ug_configure_codex_databricks` | Configure Databricks Hosted; execute the generated auth helper; open Codex TUI and read a file | Generated helper invokes `ug` with clean token stdout; completed assistant answer contains the file value; normal exit and reopen |
 | `test_ug_configure_codex_openai_mps` | Select OpenAI MPS in the real configure picker; launch Codex | Saved provider in status; completed TUI file task; normal exit |
+| `test_case_01_managed_claude_uses_admin_discovery_after_configure` | Launch configured and fresh Claude where managed config exists | The admin catalog wins in both variants |
+| `test_case_02_managed_codex_uses_admin_discovery_after_configure` | Launch configured and fresh Codex where managed config exists | The admin catalog wins in both variants |
+| `test_case_03_managed_claude_ignores_discovery_disable` | Disable discovery for configured and fresh managed Claude | The admin catalog still wins in both variants |
+| `test_case_04_managed_codex_ignores_discovery_disable` | Disable discovery for configured and fresh managed Codex | The admin catalog still wins in both variants |
+| `test_case_05_managed_claude_rejects_provider_override` | Pass a provider to configured and fresh managed Claude | ug rejects it without changing state or Claude-owned cache files |
+| `test_case_06_managed_codex_rejects_provider_override` | Pass a provider to configured and fresh managed Codex | ug rejects it without changing state or agent cache files |
+| `test_case_07_managed_claude_rejects_model_location_override` | Pass a model location to configured and fresh managed Claude | ug rejects it without changing state or Claude-owned cache files |
+| `test_case_08_managed_codex_rejects_model_location_override` | Pass a model location to configured and fresh managed Codex | ug rejects it without changing state or agent cache files |
+| `test_case_09_managed_claude_rejects_provider_when_discovery_disabled` | Disable discovery and pass a provider to managed Claude | ug rejects both variants without changing state or Claude-owned cache files |
+| `test_case_10_managed_codex_rejects_provider_when_discovery_disabled` | Disable discovery and pass a provider to managed Codex | ug rejects both variants without changing state or agent cache files |
+| `test_case_11_managed_claude_rejects_model_location_when_discovery_disabled` | Disable discovery and pass a model location to managed Claude | ug rejects both variants without changing state or Claude-owned cache files |
+| `test_case_12_managed_codex_rejects_model_location_when_discovery_disabled` | Disable discovery and pass a model location to managed Codex | ug rejects both variants without changing state or agent cache files |
 | `test_case_13_configured_claude_reuses_saved_model_location` | Configure Claude with a model location, then launch without options | The saved parent supplies the discovered catalog |
 | `test_case_14_configured_codex_reuses_saved_model_location` | Configure Codex with a model location, then launch without options | The saved parent supplies the discovered catalog |
 | `test_case_15_fresh_claude_uses_system_models_when_discovery_disabled` | Launch fresh Claude with discovery disabled | Workspace `system.ai` models appear; Claude Code creates no cache after picker launch |
@@ -69,10 +81,11 @@ All tests live directly in `integration/`; shared mechanics live in `utils/`.
 | `test_ug_and_ucode_web_search_helpers_preserve_mcp_stdio` | Initialize and list tools through both web-search helper commands | Exactly the MCP JSON-RPC responses; no text/ANSI contamination; existing server/tool identities preserved; no model request |
 
 With both agents selected there are **59 live cases** (14 interactive TUI cases),
-**2 managed-workspace cases** (marker `managed`, run against the workspace that publishes a
+**26 managed-workspace cases** (marker `managed`, run against the workspace that publishes a
 CodingAgentConfig), and **5 installation checks**. Parametrization varies argument spelling,
 routing mode, or configured/fresh entry path; it never hides the agent/provider in the test name.
-The 12 numbered functions expand to **20 live executions**, and all groups total **66 executions**.
+The 24 numbered functions expand to **44 configured/fresh executions**, and all groups total
+**90 executions**.
 Duplicate boot-only cases are incorporated into the Databricks configuration TUI journeys.
 Generated-file cleanup and strict app-server stdout assertions remain enforced.
 
@@ -127,7 +140,6 @@ pending. The descriptive jobs provide the actual coverage and diagnostics.
 | Live MCP and skills functionality | Deferred; installation tests cover the local web-search MCP handshake and tool listing, not upstream proxying or a real search request |
 | Broad configure flags, tracing, multiple workspaces, OAuth/PAT flows | Deferred while focusing on basic CUJs |
 | Relayed/subscription MPS discovery | Not covered by the scoped discovery journeys |
-| Tests-table managed-config cases 1–12 | Covered by the stacked managed-config follow-up, not this change |
 | Fresh provider/parent validation and mixed Bedrock filtering | Not covered after removing the duplicate model-discovery suites |
 | TUI initial prompt supplied on the launch command line | Not yet covered; headless prompt arguments are covered |
 | Follow-up turns and conversation resume | Not covered; reopen proves startup, not conversation resume |

@@ -1,7 +1,8 @@
 # Integration tests
 
-This suite runs the **installed product** through subprocesses, against the same
-`UCODE_TEST_WORKSPACE` used by the existing e2e tests. It does not import `ucode`,
+This suite runs the **installed product** through subprocesses. Every invocation uses the standard
+`UCODE_TEST_WORKSPACE` and `DATABRICKS_BEARER` inputs. Managed-config jobs point those inputs at
+the managed workspace after minting a short-lived M2M bearer. The suite does not import `ucode`,
 patch application functions, substitute agent executables, run a fake gateway,
 or construct ug state files. The normal test suite checks these boundaries.
 
@@ -97,6 +98,8 @@ test_ug_configure_claude_lifecycle.py   # repeat setup, revert, rejected credent
 test_ug_configure_codex_lifecycle.py    # repeat setup, revert, rejected credentials
 test_ug_claude_model_discovery.py       # Tests-tab cases 13, 15, 17, 19, 21, 23
 test_ug_codex_model_discovery.py        # Tests-tab cases 14, 16, 18, 20, 22, 24
+test_ug_claude_managed_model_discovery.py # managed Tests-tab cases 1, 3, 5, 7, 9, 11
+test_ug_codex_managed_model_discovery.py  # managed Tests-tab cases 2, 4, 6, 8, 10, 12
 test_ug_configure_managed.py            # managed workspace: static model list, no agent selector
 test_installation.py                   # fresh installed package
 utils/                                # process/terminal/evidence helpers and Docker files
@@ -145,11 +148,11 @@ Scoped discovery additionally requires Model Services
 `--parent-schema`, `--claude-parent-model`, or `--codex-parent-model`. The tests
 consume but never create or modify them.
 
-There are **59 live cases** (including 14 TUI journeys) and **5 installation
-checks** with both agents. A separate **2 managed-workspace cases** (one per agent,
-marker `managed`) run against a workspace that publishes a CodingAgentConfig; see
-"Managed-workspace journeys" below. The 12 numbered functions expand to **20 live
-executions**, and the three groups total **66 executions**. See the named coverage and gaps matrix in
+There are **59 live cases** (including 14 TUI journeys), **26 managed-workspace
+cases** (marker `managed`), and **5 installation checks** with both agents. Managed cases run
+against the workspace that publishes a CodingAgentConfig; see "Managed-workspace journeys"
+below. The 24 numbered functions expand to **44 configured/fresh executions**, and the three
+groups total **90 executions**. See the named coverage and gaps matrix in
 [../README.md](../README.md).
 
 ```bash
@@ -215,6 +218,7 @@ container option. Matching dependency versions does not make those OS environmen
 Its installation job needs no credentials. For same-repository PRs, the live jobs
 reuse the existing `UCODE_TEST_WORKSPACE` and `DATABRICKS_BEARER` secrets. Fork PRs
 run installation checks only because they cannot receive those secrets.
+The managed discovery rows run in their own M2M-authenticated jobs against the managed workspace.
 
 The workspace check requires the secret to match
 `https://eng-ml-inference-team-us-east-1.cloud.databricks.com` (a trailing slash
@@ -253,13 +257,15 @@ cannot still be running when that gate passes. Full coverage on PRs needs no lab
 
 ### Managed-workspace journeys
 
-`test_ug_configure_managed.py` (marker `managed`, not `live`) runs in its own per-agent
+The 26 managed-only executions—the two cases in `test_ug_configure_managed.py` plus
+configured and fresh variants of the first 12 numbered model-discovery contracts—run in per-agent
 **Managed config** jobs against a second workspace that publishes an admin CodingAgentConfig,
-which the shared `live` workspace deliberately does not. This is the only path exercised end to
-end: `ug configure` applies the admin config to every enabled agent with no agent selector, and
-each agent's generated config exposes exactly the admin's static `model_services`
+which the shared `live` workspace deliberately does not. `ug configure` applies the admin config
+to every enabled agent with no agent selector, and each agent's generated config exposes exactly
+the admin's static `model_services`
 (Claude's `availableModels`/`modelPicker`, Codex's model catalog). The expected model ids live in
-the test and mirror the published config; update them there if the admin list changes.
+`utils/constants.py` and mirror the published config; update them there if the admin list changes.
+Each agent lane runs 13 managed cases.
 
 That workspace authenticates as a service principal, so CI mints a short-lived token per run from
 these same-repository secrets rather than storing a long-lived bearer:
@@ -283,7 +289,7 @@ optional `dependency` such as `tomlkit==0.14.0`, equivalent to the local runner'
 `--dependency` option. Jobs use Ubuntu 22.04; newer Ubuntu runner
 policies prevented Codex's bubblewrap tool from reading even the test file in the
 first run. The agent sandbox is not disabled or bypassed.
-The workflow consumes the stored bearer; it does not mint or refresh credentials.
+The runner mints a short-lived bearer from those credentials for each job.
 
 For a manual run, use **Actions → Integration → Run workflow**, select the branch,
 and choose `full` (default), `smoke`, `tui`, or `installation`. `live` remains an

@@ -92,7 +92,7 @@ def test_live_integration_cases_belong_to_exactly_one_ci_agent():
                     assert len(marks & {"claude", "codex"}) == 1, node.name
 
 
-def test_unmanaged_model_discovery_cases_match_the_tests_table():
+def test_model_discovery_cases_match_the_tests_table():
     root = Path(__file__).parent / "integration"
     seen = set()
     executions = 0
@@ -116,10 +116,11 @@ def test_unmanaged_model_discovery_cases_match_the_tests_table():
             case = int(match.group(1))
             seen.add(case)
             marks = module_marks | _markers(node.decorator_list)
-            assert marks & {"managed", "live"} == {"live"}, node.name
+            expected = {"managed"} if case <= 12 else {"live"}
+            assert marks & {"managed", "live"} == expected, node.name
             has_configured_argument = any(arg.arg == "configured" for arg in node.args.args)
             parametrizations = _parametrize_values(node, "configured")
-            if case >= 17:
+            if case <= 12 or case >= 17:
                 assert has_configured_argument, node.name
                 assert parametrizations == [[True, False]], node.name
                 executions += 2
@@ -127,8 +128,8 @@ def test_unmanaged_model_discovery_cases_match_the_tests_table():
                 assert not has_configured_argument, node.name
                 assert parametrizations == [], node.name
                 executions += 1
-    assert seen == set(range(13, 25))
-    assert executions == 20
+    assert seen == set(range(1, 25))
+    assert executions == 44
 
 
 def test_smoke_covers_hosted_configuration_and_headless_for_both_agents():
