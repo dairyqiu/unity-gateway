@@ -1571,10 +1571,10 @@ class TestClaudeLaunch:
 
         assert calls == ["cache.stop", "server_close", "client.close"]
 
-    def test_relayed_thread_start_failure_terminates_child_without_server_shutdown(
+    def test_relayed_thread_start_failure_kills_unresponsive_child_without_server_shutdown(
         self, monkeypatch
     ):
-        calls: list[str] = []
+        calls: list[object] = []
 
         class Server:
             server_address = ("127.0.0.1", 12345)
@@ -1597,12 +1597,20 @@ class TestClaudeLaunch:
                 calls.append("client.close")
 
         class Process:
+            wait_calls = 0
+
             def terminate(self):
                 calls.append("proc.terminate")
 
-            def wait(self):
-                calls.append("proc.wait")
-                return 1
+            def wait(self, *, timeout):
+                self.wait_calls += 1
+                calls.append(("proc.wait", timeout))
+                if self.wait_calls == 1:
+                    raise subprocess.TimeoutExpired(cmd="claude", timeout=timeout)
+                return -9
+
+            def kill(self):
+                calls.append("proc.kill")
 
         class Thread:
             def start(self):
@@ -1632,7 +1640,9 @@ class TestClaudeLaunch:
         assert calls == [
             "thread.start",
             "proc.terminate",
-            "proc.wait",
+            ("proc.wait", claude.RELAYED_PROCESS_SHUTDOWN_TIMEOUT_SECONDS),
+            "proc.kill",
+            ("proc.wait", claude.RELAYED_PROCESS_SHUTDOWN_TIMEOUT_SECONDS),
             "cache.stop",
             "server_close",
             "client.close",

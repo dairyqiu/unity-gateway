@@ -86,6 +86,7 @@ CLAUDE_BACKUP_PATH = APP_DIR / "claude-ucode-settings.backup.json"
 WEB_SEARCH_MCP_STATE_KEY = "claude_web_search_mcp"
 MINIMUM_CLAUDE_VERSION = (2, 1, 248)
 MINIMUM_CLAUDE_VERSION_TEXT = "2.1.248"
+RELAYED_PROCESS_SHUTDOWN_TIMEOUT_SECONDS = 5
 _TRANSIENT_DISCOVERY_STATE_KEYS = (
     "_claude_launch_provider",
     "_claude_launch_parent_schema",
@@ -1587,7 +1588,11 @@ def _launch_relayed(
             server_thread_started = True
         except BaseException:
             proc.terminate()
-            proc.wait()
+            try:
+                proc.wait(timeout=RELAYED_PROCESS_SHUTDOWN_TIMEOUT_SECONDS)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=RELAYED_PROCESS_SHUTDOWN_TIMEOUT_SECONDS)
             raise
         try:
             returncode = proc.wait()
