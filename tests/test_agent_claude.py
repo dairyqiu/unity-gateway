@@ -47,13 +47,13 @@ class TestClaudeSpec:
 class TestMinimumVersion:
     @pytest.mark.parametrize("version", ["2.1.248", "2.1.250", "3.0.0"])
     def test_supported_version(self, monkeypatch, version):
-        monkeypatch.setenv(v2.ENV_VAR, "1")
+        monkeypatch.setenv(v2.ENABLE_SMART_ROUTING_ENV_VAR, "1")
         monkeypatch.setattr(claude, "agent_version", lambda _binary: version)
 
         assert claude.minimum_version_error() is None
 
     def test_older_version_requires_update(self, monkeypatch):
-        monkeypatch.setenv(v2.ENV_VAR, "1")
+        monkeypatch.setenv(v2.ENABLE_SMART_ROUTING_ENV_VAR, "1")
         monkeypatch.setattr(claude, "agent_version", lambda _binary: "2.1.247")
 
         assert claude.minimum_version_error() == (
@@ -72,20 +72,20 @@ class TestMinimumVersion:
         assert claude.minimum_version_error() == expected
 
     def test_smart_routing_message_wins_when_both_features_are_enabled(self, monkeypatch):
-        monkeypatch.setenv(v2.ENV_VAR, "1")
+        monkeypatch.setenv(v2.ENABLE_SMART_ROUTING_ENV_VAR, "1")
         monkeypatch.setenv(claude.GATEWAY_MODEL_DISCOVERY_ENV_VAR, "1")
         monkeypatch.setattr(claude, "agent_version", lambda _binary: "2.1.247")
 
         assert claude.minimum_version_error().startswith("Smart routing requires")
 
     def test_unknown_version_does_not_block(self, monkeypatch):
-        monkeypatch.setenv(v2.ENV_VAR, "1")
+        monkeypatch.setenv(v2.ENABLE_SMART_ROUTING_ENV_VAR, "1")
         monkeypatch.setattr(claude, "agent_version", lambda _binary: "unknown")
 
         assert claude.minimum_version_error() is None
 
     def test_older_version_is_not_validated_without_discovery_features(self, monkeypatch):
-        monkeypatch.delenv(v2.ENV_VAR, raising=False)
+        monkeypatch.delenv(v2.ENABLE_SMART_ROUTING_ENV_VAR, raising=False)
         monkeypatch.delenv(claude.GATEWAY_MODEL_DISCOVERY_ENV_VAR, raising=False)
         monkeypatch.setattr(claude, "agent_version", lambda _binary: "2.1.247")
 
@@ -207,7 +207,7 @@ class TestRenderOverlay:
         assert "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY" not in overlay["env"]
 
     def test_smart_routing_does_not_persist_gateway_model_discovery(self, monkeypatch):
-        monkeypatch.setenv(v2.ENV_VAR, "1")
+        monkeypatch.setenv(v2.ENABLE_SMART_ROUTING_ENV_VAR, "1")
         monkeypatch.delenv(claude.GATEWAY_MODEL_DISCOVERY_ENV_VAR, raising=False)
         overlay, _ = claude.render_overlay(WS, "s4")
         assert "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY" not in overlay["env"]
@@ -1461,7 +1461,7 @@ class TestClaudeLaunch:
         assert calls[-3:] == [("stop",), ("shutdown",), ("close",)]
 
     def test_smart_routing_on_windows_is_not_supported(self, monkeypatch):
-        monkeypatch.setenv(v2.ENV_VAR, "1")
+        monkeypatch.setenv(v2.ENABLE_SMART_ROUTING_ENV_VAR, "1")
         monkeypatch.setattr(claude.os, "name", "nt")
 
         with pytest.raises(
@@ -1476,7 +1476,7 @@ class TestClaudeLaunch:
 
     def test_default_launch_keeps_existing_auth_path(self, monkeypatch):
         calls: list[list[str]] = []
-        monkeypatch.delenv(v2.ENV_VAR, raising=False)
+        monkeypatch.delenv(v2.ENABLE_SMART_ROUTING_ENV_VAR, raising=False)
         monkeypatch.delenv(claude.GATEWAY_MODEL_DISCOVERY_ENV_VAR, raising=False)
         monkeypatch.delenv("OAUTH_TOKEN", raising=False)
         monkeypatch.setattr(claude, "get_databricks_token", lambda *_args: "token")
@@ -1513,7 +1513,7 @@ class TestClaudeLaunch:
     )
     def test_v2_noninteractive_launch_bypasses_first_prompt_routing(self, monkeypatch, tool_args):
         calls: list[list[str]] = []
-        monkeypatch.setenv(v2.ENV_VAR, "1")
+        monkeypatch.setenv(v2.ENABLE_SMART_ROUTING_ENV_VAR, "1")
         monkeypatch.setattr(v2, "launch_claude", Mock())
         monkeypatch.setattr(claude, "get_databricks_token", lambda *_args: "token")
         monkeypatch.setattr(claude, "exec_or_spawn", lambda argv: calls.append(argv))
@@ -1525,7 +1525,7 @@ class TestClaudeLaunch:
 
     @pytest.mark.parametrize("tool_args", [["fix this bug"], ["--", "fix this bug"]])
     def test_v2_positional_prompt_uses_first_prompt_routing(self, monkeypatch, tool_args):
-        monkeypatch.setenv(v2.ENV_VAR, "1")
+        monkeypatch.setenv(v2.ENABLE_SMART_ROUTING_ENV_VAR, "1")
         launch_v2 = Mock()
         monkeypatch.setattr(v2, "launch_claude", launch_v2)
 
@@ -1548,7 +1548,7 @@ class TestClaudeLaunch:
 
     def test_gateway_discovery_uses_direct_gateway(self, monkeypatch):
         calls: list[list[str]] = []
-        monkeypatch.delenv(v2.ENV_VAR, raising=False)
+        monkeypatch.delenv(v2.ENABLE_SMART_ROUTING_ENV_VAR, raising=False)
         monkeypatch.setenv(claude.GATEWAY_MODEL_DISCOVERY_ENV_VAR, "1")
         monkeypatch.delenv("OAUTH_TOKEN", raising=False)
         monkeypatch.setattr(claude, "get_databricks_token", lambda *_args: "token")
@@ -1562,7 +1562,7 @@ class TestClaudeLaunch:
 
     def test_gateway_discovery_enabled_under_provider(self, monkeypatch):
         calls: list[list[str]] = []
-        monkeypatch.delenv(v2.ENV_VAR, raising=False)
+        monkeypatch.delenv(v2.ENABLE_SMART_ROUTING_ENV_VAR, raising=False)
         monkeypatch.setenv(claude.GATEWAY_MODEL_DISCOVERY_ENV_VAR, "1")
         monkeypatch.delenv("OAUTH_TOKEN", raising=False)
         monkeypatch.setattr(claude, "get_databricks_token", lambda *_args: "token")

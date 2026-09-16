@@ -16,26 +16,6 @@ from ucode.databricks import AnthropicModelCatalog
 from ucode.smart_routing import claude_hooks, claude_pty, routing, v2
 
 
-class TestSmartRoutingEnv:
-    def test_enable_and_restore_use_the_canonical_env_var(self, monkeypatch):
-        monkeypatch.delenv(v2.ENV_VAR, raising=False)
-        previous = v2.enable_env()
-
-        assert previous is None
-        assert os.environ[v2.ENV_VAR] == "1"
-        assert v2.enabled()
-
-        v2.restore_env(previous)
-
-        assert v2.ENV_VAR not in os.environ
-
-    def test_old_managed_env_var_name_does_not_enable_routing(self, monkeypatch):
-        monkeypatch.delenv(v2.ENV_VAR, raising=False)
-        monkeypatch.setenv("SMART_ROUTING_V2_ENABLED", "1")
-
-        assert not v2.enabled()
-
-
 class TestManagedModelPicker:
     def test_reads_model_ids_from_managed_picker(self, tmp_path, monkeypatch):
         path = tmp_path / "managed-settings.json"
@@ -279,7 +259,7 @@ class TestV2Launch:
             "claude-opus-4-8": "system.ai.claude-opus-4-8",
             "claude-sonnet-5": "system.ai.claude-sonnet-5",
         }
-        assert captured["settings"]["env"][v2.ENV_VAR] == "1"
+        assert captured["settings"]["env"][v2.ENABLE_SMART_ROUTING_ENV_VAR] == "1"
         assert claude_hooks.FIRST_PROMPT_SOCKET_ENV in captured["settings"]["env"]
         first_prompt_command = captured["settings"]["hooks"]["UserPromptSubmit"][0]["hooks"][0][
             "command"

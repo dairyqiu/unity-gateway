@@ -1547,7 +1547,7 @@ def codex_router_hook_cmd(
     import json
     import sys
 
-    if not smart_routing_v2.enabled():
+    if not smart_routing_v2.smart_routing_enabled():
         return
 
     from ucode.smart_routing.codex_routing import (
@@ -1626,7 +1626,7 @@ def claude_router_hook_cmd(
     import json
     import sys
 
-    if not smart_routing_v2.enabled():
+    if not smart_routing_v2.smart_routing_enabled():
         return
 
     from ucode.smart_routing.claude_routing import (
@@ -1748,11 +1748,11 @@ def _smart_routing_v2_flag(enabled: bool) -> Iterator[None]:
     if not enabled:
         yield
         return
-    previous = smart_routing_v2.enable_env()
+    previous = smart_routing_v2.enable_smart_routing()
     try:
         yield
     finally:
-        smart_routing_v2.restore_env(previous)
+        smart_routing_v2.restore_smart_routing_env(previous)
 
 
 @contextmanager
@@ -1767,11 +1767,11 @@ def _disable_smart_routing_for_subcommand(tool: str, ctx: Any) -> Iterator[None]
     if _smart_routing_launch_shape(tool, ctx.args, _has_explicit_prompt(ctx)):
         yield
         return
-    previous = smart_routing_v2.disable_env()
+    previous = smart_routing_v2.disable_smart_routing()
     try:
         yield
     finally:
-        smart_routing_v2.restore_env(previous)
+        smart_routing_v2.restore_smart_routing_env(previous)
 
 
 def _migrate_legacy_smart_routing(state: dict) -> dict:
@@ -2009,11 +2009,11 @@ def _managed_smart_routing_environment(managed: dict | None, tool: str) -> Itera
         yield
         return
 
-    previous = smart_routing_v2.enable_env()
+    previous = smart_routing_v2.enable_smart_routing()
     try:
         yield
     finally:
-        smart_routing_v2.restore_env(previous)
+        smart_routing_v2.restore_smart_routing_env(previous)
 
 
 def _managed_smart_routing_enabled(managed: dict | None, tool: str) -> bool:
@@ -2046,7 +2046,7 @@ def _launch_tool(
         if parent_schema is not None and not is_valid_catalog_schema(parent_schema):
             raise RuntimeError("--parent must be `<catalog>.<schema>`.")
         explicit_prompt = _has_explicit_prompt(ctx)
-        smart_routing_enabled = smart_routing_v2.enabled()
+        smart_routing_enabled = smart_routing_v2.smart_routing_enabled()
         # Launchers such as isaac put their harness arguments after `--`, so the harness's own
         # `--model` lands in ctx.args instead of a ucode option. It still determines the effective
         # launch model and should therefore win in the launch summary.

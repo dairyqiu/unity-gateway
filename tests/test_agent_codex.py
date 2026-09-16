@@ -29,14 +29,14 @@ class TestCodexSpec:
 
 class TestMinimumVersion:
     def test_smart_routing_old_version_requires_update(self, monkeypatch):
-        monkeypatch.setenv(codex.smart_routing_v2.ENV_VAR, "1")
+        monkeypatch.setenv(codex.smart_routing_v2.ENABLE_SMART_ROUTING_ENV_VAR, "1")
         monkeypatch.setattr(codex, "agent_version", lambda _binary: "0.144.0")
 
         expected = "Codex smart routing requires Codex 0.145.0 or newer; found 0.144.0."
         assert codex.minimum_version_error() == expected
 
     def test_old_version_is_not_blocked_without_smart_routing(self, monkeypatch):
-        monkeypatch.delenv(codex.smart_routing_v2.ENV_VAR, raising=False)
+        monkeypatch.delenv(codex.smart_routing_v2.ENABLE_SMART_ROUTING_ENV_VAR, raising=False)
         monkeypatch.setattr(codex, "agent_version", lambda _binary: "0.144.0")
 
         assert codex.minimum_version_error() is None
@@ -204,7 +204,7 @@ class TestCodexWriteConfig:
         monkeypatch.setattr(codex, "CODEX_CONFIG_PATH", config_path)
         monkeypatch.setattr(codex, "CODEX_BACKUP_PATH", tmp_path / "backup.toml")
         monkeypatch.setattr(codex, "agent_version", lambda _: "0.145.0")
-        monkeypatch.setenv(codex.smart_routing_v2.ENV_VAR, "1")
+        monkeypatch.setenv(codex.smart_routing_v2.ENABLE_SMART_ROUTING_ENV_VAR, "1")
         monkeypatch.delenv("CODEX_HOME", raising=False)
         state = {"workspace": WS}
 

@@ -36,7 +36,7 @@ from ucode.smart_routing.claude_hooks import (
 from ucode.smart_routing.codex_hooks import merge_pre_tool_use_hooks, routing_models
 from ucode.ui import print_warning
 
-ENV_VAR = "ENABLE_SMART_ROUTING_V2"
+ENABLE_SMART_ROUTING_ENV_VAR = "ENABLE_SMART_ROUTING_V2"
 LEGACY_STATE_KEY = "smart_routing_enabled"
 
 CODEX_INTERPOSER_LOG = APP_DIR / "codex-v2-interposer.log"
@@ -98,32 +98,34 @@ def _model_picker_catalog() -> AnthropicModelCatalog | None:
     return None
 
 
-def enabled(env: MutableMapping[str, str] | None = None) -> bool:
+def smart_routing_enabled(env: MutableMapping[str, str] | None = None) -> bool:
     source = os.environ if env is None else env
-    return source.get(ENV_VAR) == "1"
+    return source.get(ENABLE_SMART_ROUTING_ENV_VAR) == "1"
 
 
-def enable_env(env: MutableMapping[str, str] | None = None) -> str | None:
+def enable_smart_routing(env: MutableMapping[str, str] | None = None) -> str | None:
     """Set the only supported smart-routing env var and return its prior value."""
     target = os.environ if env is None else env
-    previous = target.get(ENV_VAR)
-    target[ENV_VAR] = "1"
+    previous = target.get(ENABLE_SMART_ROUTING_ENV_VAR)
+    target[ENABLE_SMART_ROUTING_ENV_VAR] = "1"
     return previous
 
 
-def restore_env(previous: str | None, env: MutableMapping[str, str] | None = None) -> None:
-    """Restore the env var state captured by ``enable_env`` or ``disable_env``."""
+def restore_smart_routing_env(
+    previous: str | None, env: MutableMapping[str, str] | None = None
+) -> None:
+    """Restore the env state captured when smart routing was enabled or disabled."""
     target = os.environ if env is None else env
     if previous is None:
-        target.pop(ENV_VAR, None)
+        target.pop(ENABLE_SMART_ROUTING_ENV_VAR, None)
     else:
-        target[ENV_VAR] = previous
+        target[ENABLE_SMART_ROUTING_ENV_VAR] = previous
 
 
-def disable_env(env: MutableMapping[str, str] | None = None) -> str | None:
+def disable_smart_routing(env: MutableMapping[str, str] | None = None) -> str | None:
     """Temporarily remove the smart-routing env var and return its prior value."""
     target = os.environ if env is None else env
-    return target.pop(ENV_VAR, None)
+    return target.pop(ENABLE_SMART_ROUTING_ENV_VAR, None)
 
 
 def _loopback_websocket_url(port: int) -> str:
@@ -440,7 +442,7 @@ def launch_claude(
     if not isinstance(env, dict):
         raise RuntimeError("Claude settings 'env' must be an object for smart routing.")
     env.pop("CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY", None)
-    env[ENV_VAR] = "1"
+    env[ENABLE_SMART_ROUTING_ENV_VAR] = "1"
     env[FIRST_PROMPT_SOCKET_ENV] = str(socket_path)
     model_overrides = settings.setdefault("modelOverrides", {})
     if not isinstance(model_overrides, dict):

@@ -99,7 +99,7 @@ def _parse_version(value: str) -> tuple[int, int, int] | None:
 
 
 def _minimum_version_requirement_message(version: str) -> str:
-    feature = "Smart routing" if smart_routing_v2.enabled() else "Model discovery"
+    feature = "Smart routing" if smart_routing_v2.smart_routing_enabled() else "Model discovery"
     return (
         f"{feature} requires Claude Code {MINIMUM_CLAUDE_VERSION_TEXT} or newer. "
         f"Your current version is Claude Code {version}."
@@ -107,7 +107,10 @@ def _minimum_version_requirement_message(version: str) -> str:
 
 
 def minimum_version_error() -> str | None:
-    if os.environ.get(GATEWAY_MODEL_DISCOVERY_ENV_VAR) != "1" and not smart_routing_v2.enabled():
+    if (
+        os.environ.get(GATEWAY_MODEL_DISCOVERY_ENV_VAR) != "1"
+        and not smart_routing_v2.smart_routing_enabled()
+    ):
         return None
     version = agent_version(SPEC["binary"])
     parsed = _parse_version(version)
