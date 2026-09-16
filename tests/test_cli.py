@@ -556,7 +556,7 @@ class TestSubcommandRouting:
             tool_args,
             smart_routing_enabled=True,
             explicit_prompt=explicit_prompt,
-            model=model,
+            explicit_model=model,
             provider=provider,
         )
 
@@ -598,7 +598,7 @@ class TestSubcommandRouting:
             [],
             smart_routing_enabled=enabled,
             explicit_prompt=False,
-            model=None,
+            explicit_model=None,
             provider=None,
         )
 
@@ -622,7 +622,7 @@ class TestSubcommandRouting:
             tool_args,
             smart_routing_enabled=True,
             explicit_prompt=False,
-            model=None,
+            explicit_model=None,
             provider=None,
         )
 
@@ -634,9 +634,9 @@ class TestSubcommandRouting:
             [],
             smart_routing_enabled=True,
             explicit_prompt=False,
-            model=None,
+            explicit_model=None,
             provider=None,
-            claude_launch_model="system.ai.claude-sonnet-4-6",
+            claude_start_model="system.ai.claude-sonnet-4-6",
         )
 
         assert options.launch_smart_routing is True
