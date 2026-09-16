@@ -2017,9 +2017,9 @@ def _launch_tool(
         if _child_owns_stdout(tool, ctx.args):
             redirect_output_to_stderr()
         if provider is not None and parent_schema is not None:
-            raise RuntimeError("--provider and --parent cannot be used together.")
+            raise RuntimeError("--provider and --model-location cannot be used together.")
         if parent_schema is not None and not is_valid_catalog_schema(parent_schema):
-            raise RuntimeError("--parent must be `<catalog>.<schema>`.")
+            raise RuntimeError("--model-location must be `<catalog>.<schema>`.")
         explicit_prompt = _has_explicit_prompt(ctx)
         smart_routing_enabled = smart_routing_v2.enabled()
         # Launchers such as isaac put their harness arguments after `--`, so the harness's own
@@ -2115,7 +2115,7 @@ def _launch_tool(
             if managed_provider:
                 provider = managed_provider
         if provider and parent_schema is not None:
-            raise RuntimeError("--provider and --parent cannot be used together.")
+            raise RuntimeError("--provider and --model-location cannot be used together.")
         # Checked after the managed config settles `provider`: an admin-set provider must trip this
         # guard too, or routing would be persisted as on while a provider is active.
         if tool in CAN_USE_CACHED_CONFIG_AGENTS and smart_routing_enabled and provider:
@@ -2467,10 +2467,10 @@ def codex_cmd(
             "before any `--` separator.",
         ),
     ] = None,
-    parent: Annotated[
+    model_location: Annotated[
         str | None,
         typer.Option(
-            "--parent",
+            "--model-location",
             help="Discover model services in `<catalog>.<schema>`. Example: main.default",
         ),
     ] = None,
@@ -2535,7 +2535,7 @@ def codex_cmd(
                 refresh=refresh,
                 skip_preflight=skip_preflight,
                 workspace_url=workspace,
-                parent_schema=parent,
+                parent_schema=model_location,
                 custom_oauth=custom_oauth,
             )
 
@@ -2556,10 +2556,10 @@ def claude_cmd(
             "before any `--` separator.",
         ),
     ] = None,
-    parent: Annotated[
+    model_location: Annotated[
         str | None,
         typer.Option(
-            "--parent",
+            "--model-location",
             help="Discover model services in `<catalog>.<schema>`. Example: main.default",
         ),
     ] = None,
@@ -2634,7 +2634,7 @@ def claude_cmd(
         claude_agent.disable_smart_routing(load_state())
         print_success("Claude Code smart routing disabled; ug routing hooks removed")
         return
-    if enable_model_discovery or (parent is not None and provider is None):
+    if enable_model_discovery or (model_location is not None and provider is None):
         os.environ[claude_agent.GATEWAY_MODEL_DISCOVERY_ENV_VAR] = "1"
     with _smart_routing_v2_flag(enable_smart_routing_flag):
         with _disable_smart_routing_for_subcommand("claude", ctx):
@@ -2646,7 +2646,7 @@ def claude_cmd(
                 refresh=refresh,
                 skip_preflight=skip_preflight,
                 workspace_url=workspace,
-                parent_schema=parent,
+                parent_schema=model_location,
                 custom_oauth=custom_oauth,
             )
 

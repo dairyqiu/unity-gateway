@@ -116,6 +116,10 @@ class TestHelp:
         result = runner.invoke(app, [tool, "--help"])
         assert result.exit_code == 0
         assert "Usage:" in result.output
+        if tool in {"claude", "codex"}:
+            output = _strip_ansi(result.output)
+            assert "--model-location" in output
+            assert "--parent" not in output
 
     def test_configure_help_lists_agents_flag(self):
         result = runner.invoke(app, ["configure", "--help"])
@@ -636,38 +640,47 @@ class TestSubcommandRouting:
         assert os.environ["ENABLE_CLAUDE_CODE_GATEWAY_MODEL_DISCOVERY"] == "1"
         assert mock_launch.call_args.args[1].args == []
 
-    def test_claude_parent_is_forwarded(self):
+    def test_claude_model_location_is_forwarded(self):
         with patch("ucode.cli._launch_tool") as mock_launch:
-            result = runner.invoke(app, ["claude", "--parent", "main.default"])
+            result = runner.invoke(app, ["claude", "--model-location", "main.default"])
 
         assert result.exit_code == 0, result.output
         assert mock_launch.call_args.kwargs["parent_schema"] == "main.default"
+        assert mock_launch.call_args.args[1].args == []
         assert os.environ["ENABLE_CLAUDE_CODE_GATEWAY_MODEL_DISCOVERY"] == "1"
 
-    def test_codex_parent_is_forwarded(self):
+    def test_codex_model_location_is_forwarded(self):
         with patch("ucode.cli._launch_tool") as mock_launch:
-            result = runner.invoke(app, ["codex", "--parent", "main.default"])
+            result = runner.invoke(app, ["codex", "--model-location", "main.default"])
 
         assert result.exit_code == 0, result.output
         assert mock_launch.call_args.kwargs["parent_schema"] == "main.default"
+        assert mock_launch.call_args.args[1].args == []
 
-    def test_codex_provider_and_parent_are_mutually_exclusive(self):
+    def test_codex_provider_and_model_location_are_mutually_exclusive(self):
         result = runner.invoke(
             app,
-            ["codex", "--provider", "main.default.provider", "--parent", "main.default"],
+            ["codex", "--provider", "main.default.provider", "--model-location", "main.default"],
         )
 
         assert result.exit_code == 1
-        assert "--provider and --parent cannot be used together" in result.output
+        assert "--provider and --model-location cannot be used together" in result.output
 
-    def test_claude_provider_and_parent_are_mutually_exclusive(self):
+    def test_claude_provider_and_model_location_are_mutually_exclusive(self):
         result = runner.invoke(
             app,
-            ["claude", "--provider", "main.default.provider", "--parent", "main.default"],
+            ["claude", "--provider", "main.default.provider", "--model-location", "main.default"],
         )
 
         assert result.exit_code == 1
-        assert "--provider and --parent cannot be used together" in result.output
+        assert "--provider and --model-location cannot be used together" in result.output
+
+    @pytest.mark.parametrize("tool", ["claude", "codex"])
+    def test_invalid_model_location_is_rejected(self, tool):
+        result = runner.invoke(app, [tool, "--model-location", "main"])
+
+        assert result.exit_code == 1
+        assert "--model-location must be `<catalog>.<schema>`." in _strip_ansi(result.output)
 
     def test_claude_enable_model_discovery_is_hidden_from_help(self):
         result = runner.invoke(app, ["claude", "--help"])
@@ -1114,7 +1127,7 @@ class TestClaudeModelFlag:
         assert result.exit_code == 0, result.output
         assert mock_launch.call_args.args[1]["_codex_launch_provider"] == "main.default.openai"
 
-    def test_parent_sets_transient_codex_launch_marker(self):
+    def test_model_location_sets_transient_codex_launch_marker(self):
         state = dict(MINIMAL_STATE)
         with (
             patch("ucode.cli.ensure_bootstrap_dependencies"),
@@ -1126,7 +1139,7 @@ class TestClaudeModelFlag:
             patch("ucode.cli._fetch_managed_config", return_value=(None, False)),
             patch("ucode.cli.launch_agent") as mock_launch,
         ):
-            result = runner.invoke(app, ["codex", "--parent", "main.default"])
+            result = runner.invoke(app, ["codex", "--model-location", "main.default"])
 
         assert result.exit_code == 0, result.output
         assert mock_launch.call_args.args[1]["_codex_launch_parent_schema"] == "main.default"
