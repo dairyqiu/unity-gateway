@@ -62,6 +62,12 @@ def _agent_model_config(managed: dict, tool: str) -> dict[str, object]:
     return _as_dict(_agent_entry(managed, tool).get("model_config"))
 
 
+def _agent_http_headers(managed: dict, tool: str) -> dict[str, str]:
+    """Return the manifest's custom ``http_headers`` for ``tool`` (str->str only)."""
+    headers = _as_dict(_agent_entry(managed, tool).get("http_headers"))
+    return {k: v for k, v in headers.items() if isinstance(k, str) and isinstance(v, str)}
+
+
 def managed_otel_tracing_enabled(managed: dict, tool: str) -> bool:
     """Whether managed config enables OTLP trace export for ``tool``."""
     return _agent_entry(managed, tool).get("otel_tracing_enabled") is True
@@ -94,6 +100,9 @@ def managed_state_overrides(managed: dict, tool: str) -> dict[str, object]:
     default_model = _str(_agent_model_config(managed, tool).get("default_model"))
     if default_model:
         overrides[f"{tool}_default_model"] = default_model
+    http_headers = _agent_http_headers(managed, tool)
+    if http_headers:
+        overrides[f"{tool}_http_headers"] = http_headers
     if tool in OTEL_TRACING_TOOLS and managed_otel_tracing_enabled(managed, tool):
         overrides[f"{tool}_otel_tracing"] = True
     return overrides
@@ -126,14 +135,16 @@ def managed_unservable_models(managed: dict, tool: str) -> list[str]:
 
 def _manifest_models(managed: dict, tool: str) -> dict | list | None:
     """The manifest's models for ``tool`` in its own vocabulary, or None when it names none."""
-    manifest_models = _agent_model_config(managed, tool).get("models")
+    model_config = _agent_model_config(managed, tool)
     if tool == "claude":
+        family_slots = _as_dict(model_config.get("default_models_by_model_family"))
         slots: dict[str, str] = {}
         for slot, family in _CLAUDE_FAMILY_SLOTS.items():
-            model = _str(_as_dict(manifest_models).get(slot))
+            model = _str(family_slots.get(slot))
             if model:
                 slots[family] = model
         return slots or None
+    manifest_models = model_config.get("models")
     if isinstance(manifest_models, list):
         listed = [model for model in (_str(item) for item in manifest_models) if model]
         return listed or None
@@ -186,6 +197,11 @@ def managed_supplies_models(managed: dict | None, tool: str) -> bool:
 def managed_provider_service(managed: dict, tool: str) -> str | None:
     """Return only the provider the managed config specifies for ``tool``, ignoring local state."""
     return _str(_agent_model_config(managed, tool).get("model_provider_service"))
+
+
+def managed_unity_catalog_location(managed: dict, tool: str) -> str | None:
+    """Return only the Unity Catalog model location managed config specifies for ``tool``."""
+    return _str(_agent_model_config(managed, tool).get("unity_catalog_location"))
 
 
 def managed_static_models(managed: dict, tool: str) -> list[str] | None:
@@ -242,7 +258,7 @@ def managed_provider_family_models(managed: dict) -> dict[str, str] | None:
 
     config = _agent_model_config(managed, "claude")
     slots: dict[str, str] = {}
-    raw_slots = _as_dict(config.get("models"))
+    raw_slots = _as_dict(config.get("default_models_by_model_family"))
     for slot, family in _CLAUDE_FAMILY_SLOTS.items():
         model = _str(raw_slots.get(slot))
         if model:
